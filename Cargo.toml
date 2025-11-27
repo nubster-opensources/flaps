@@ -37,11 +37,11 @@ axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
+# Database (0.8+ fixes RUSTSEC-2024-0363, default-features=false avoids mysql/rsa RUSTSEC-2023-0071)
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
 
 # Redis
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # UUID & Time
 uuid = { version = "1.6", features = ["v4", "v7", "serde"] }

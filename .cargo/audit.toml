@@ -1,0 +1,12 @@
+# cargo-audit configuration
+# https://rustsec.org/
+
+[advisories]
+ignore = [
+    # Unmaintained crates with no fix available (transitive dependencies)
+    "RUSTSEC-2024-0436", # paste - via sqlx, no alternative in sqlx yet
+    "RUSTSEC-2025-0120", # json5 - via config crate, consider switching to figment later
+    # sqlx-macros-core pulls in all drivers for compile-time checking, including mysql/rsa
+    # We don't use MySQL at runtime, this is compile-time only - no actual security risk
+    "RUSTSEC-2023-0071", # rsa via sqlx-mysql (compile-time only, not used at runtime)
+]
