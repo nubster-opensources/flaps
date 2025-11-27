@@ -64,9 +64,28 @@ impl EvaluationResult {
         }
     }
 
-    /// Returns true if the value is truthy.
+    /// Returns true if the flag is enabled and the value is truthy.
+    ///
+    /// This returns false when:
+    /// - The flag is disabled in the environment
+    /// - The flag was not found
+    /// - The environment was not found
+    /// - The user was excluded from rollout
+    /// - There was an error during evaluation
+    ///
+    /// This ensures kill switches work correctly for all flag types,
+    /// including string flags where the fallback value might be non-empty.
     pub fn is_enabled(&self) -> bool {
-        self.value.is_truthy()
+        match self.reason {
+            EvaluationReason::FlagDisabled
+            | EvaluationReason::FlagNotFound
+            | EvaluationReason::EnvironmentNotFound
+            | EvaluationReason::RolloutExcluded
+            | EvaluationReason::Error => false,
+            EvaluationReason::Default
+            | EvaluationReason::TargetingMatch
+            | EvaluationReason::RolloutIncluded => self.value.is_truthy(),
+        }
     }
 
     /// Returns the boolean value or false.
@@ -556,5 +575,37 @@ mod tests {
 
         // 100% = everyone
         assert!(evaluator.is_in_rollout("any-user", "flag", 100));
+    }
+
+    #[test]
+    fn test_disabled_string_flag_is_not_enabled() {
+        // Regression test: disabled string flags should return is_enabled() == false
+        // even though the fallback value is a non-empty string.
+        // This ensures kill switches work for all flag types.
+        let evaluator = Evaluator::new();
+        let flag = Flag::new_string(
+            "ab-test",
+            "A/B Test",
+            vec!["variant-a".to_string(), "variant-b".to_string()],
+            ProjectId::new(),
+            UserId::new("creator"),
+        )
+        .with_environment("dev", EnvironmentConfig::enabled_string("variant-a"))
+        .with_environment("prod", EnvironmentConfig::disabled());
+
+        let context = EvaluationContext::with_user_id("user-1");
+
+        // Enabled environment: should be enabled with the variant
+        let dev_result = evaluator.evaluate(&flag, "dev", &context);
+        assert!(dev_result.is_enabled());
+        assert_eq!(dev_result.value.as_str(), Some("variant-a"));
+        assert_eq!(dev_result.reason, EvaluationReason::Default);
+
+        // Disabled environment: should NOT be enabled even with a non-empty fallback
+        let prod_result = evaluator.evaluate(&flag, "prod", &context);
+        assert!(!prod_result.is_enabled()); // This was the bug!
+        assert_eq!(prod_result.reason, EvaluationReason::FlagDisabled);
+        // Value is still returned for logging/debugging, but is_enabled is false
+        assert_eq!(prod_result.value.as_bool(), None); // It's a string flag
     }
 }
