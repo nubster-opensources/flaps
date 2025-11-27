@@ -196,7 +196,11 @@ impl SegmentCondition {
 
     /// Creates an "ends with" condition (useful for email domains).
     pub fn ends_with(attribute: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(attribute, Operator::EndsWith, AttributeValue::String(value.into()))
+        Self::new(
+            attribute,
+            Operator::EndsWith,
+            AttributeValue::String(value.into()),
+        )
     }
 
     /// Creates an "in list" condition.
@@ -219,8 +223,7 @@ mod tests {
         )
         .with_description("Users who opted into beta testing")
         .with_rule(
-            SegmentRule::new()
-                .with_condition(SegmentCondition::ends_with("email", "@nubster.com"))
+            SegmentRule::new().with_condition(SegmentCondition::ends_with("email", "@nubster.com")),
         )
         .with_included_user("special-user-1")
         .with_excluded_user("banned-user-1");

@@ -134,7 +134,10 @@ mod tests {
         assert_eq!(err.to_string(), "Flag not found: my-flag");
 
         let err = FlapsError::validation("Invalid percentage value");
-        assert_eq!(err.to_string(), "Validation error: Invalid percentage value");
+        assert_eq!(
+            err.to_string(),
+            "Validation error: Invalid percentage value"
+        );
     }
 
     #[test]

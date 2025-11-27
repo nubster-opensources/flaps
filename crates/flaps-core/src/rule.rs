@@ -124,17 +124,29 @@ impl Condition {
 
     /// Creates a "contains" condition.
     pub fn contains(attribute: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(attribute, Operator::Contains, AttributeValue::String(value.into()))
+        Self::new(
+            attribute,
+            Operator::Contains,
+            AttributeValue::String(value.into()),
+        )
     }
 
     /// Creates a "starts with" condition.
     pub fn starts_with(attribute: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(attribute, Operator::StartsWith, AttributeValue::String(value.into()))
+        Self::new(
+            attribute,
+            Operator::StartsWith,
+            AttributeValue::String(value.into()),
+        )
     }
 
     /// Creates an "ends with" condition.
     pub fn ends_with(attribute: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(attribute, Operator::EndsWith, AttributeValue::String(value.into()))
+        Self::new(
+            attribute,
+            Operator::EndsWith,
+            AttributeValue::String(value.into()),
+        )
     }
 
     /// Creates an "in list" condition.
@@ -144,7 +156,11 @@ impl Condition {
 
     /// Creates a "matches segment" condition.
     pub fn matches_segment(segment_id: SegmentId) -> Self {
-        Self::new("", Operator::MatchesSegment, AttributeValue::SegmentRef(segment_id))
+        Self::new(
+            "",
+            Operator::MatchesSegment,
+            AttributeValue::SegmentRef(segment_id),
+        )
     }
 }
 
@@ -289,7 +305,10 @@ mod tests {
     fn test_create_rule_with_conditions() {
         let rule = TargetingRule::new(1, FlagValue::Boolean(true))
             .with_condition(Condition::equals("plan", "pro"))
-            .with_condition(Condition::in_list("country", vec!["FR".to_string(), "BE".to_string()]))
+            .with_condition(Condition::in_list(
+                "country",
+                vec!["FR".to_string(), "BE".to_string()],
+            ))
             .with_rollout(50);
 
         assert_eq!(rule.priority, 1);

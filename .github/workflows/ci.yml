@@ -1,0 +1,72 @@
+name: CI
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    name: CI
+    runs-on: [self-hosted, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_HOME="${RUNNER_TEMP}/cargo"
+          RUSTUP_HOME="${RUNNER_TEMP}/rustup"
+          mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install security tools
+        run: |
+          command -v cargo-audit || cargo install cargo-audit --locked
+          command -v cargo-deny || cargo install cargo-deny@0.18.3 --locked
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Security audit
+        run: cargo audit
+
+      - name: Dependency check
+        run: cargo deny check advisories bans sources
+
+      - name: Build release
+        if: github.ref == 'refs/heads/main'
+        run: cargo build --release --locked

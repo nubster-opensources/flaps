@@ -57,7 +57,11 @@ impl EvaluationContext {
     }
 
     /// Sets an attribute value (mutable reference version).
-    pub fn set_mut(&mut self, key: impl Into<String>, value: impl Into<AttributeValue>) -> &mut Self {
+    pub fn set_mut(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<AttributeValue>,
+    ) -> &mut Self {
         self.attributes.insert(key.into(), value.into());
         self
     }

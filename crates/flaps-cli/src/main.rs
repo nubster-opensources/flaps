@@ -212,62 +212,91 @@ fn main() {
         Commands::Flag { action } => match action {
             FlagCommands::List { project } => {
                 println!("Listing flags for project: {}", project);
-            }
+            },
             FlagCommands::Get { key, project } => {
                 println!("Getting flag {} in project {}", key, project);
-            }
-            FlagCommands::Create { key, name, project, r#type } => {
-                println!("Creating flag {} ({}) in project {} with type {}", key, name, project, r#type);
-            }
-            FlagCommands::Toggle { key, project, env, enabled } => {
-                println!("Toggling flag {} in project {} env {} to {}", key, project, env, enabled);
-            }
+            },
+            FlagCommands::Create {
+                key,
+                name,
+                project,
+                r#type,
+            } => {
+                println!(
+                    "Creating flag {} ({}) in project {} with type {}",
+                    key, name, project, r#type
+                );
+            },
+            FlagCommands::Toggle {
+                key,
+                project,
+                env,
+                enabled,
+            } => {
+                println!(
+                    "Toggling flag {} in project {} env {} to {}",
+                    key, project, env, enabled
+                );
+            },
             FlagCommands::Delete { key, project } => {
                 println!("Deleting flag {} in project {}", key, project);
-            }
+            },
         },
         Commands::Project { action } => match action {
             ProjectCommands::List => {
                 println!("Listing projects");
-            }
+            },
             ProjectCommands::Get { key } => {
                 println!("Getting project {}", key);
-            }
+            },
             ProjectCommands::Create { key, name } => {
                 println!("Creating project {} ({})", key, name);
-            }
+            },
             ProjectCommands::Delete { key } => {
                 println!("Deleting project {}", key);
-            }
+            },
         },
         Commands::Env { action } => match action {
             EnvCommands::List { project } => {
                 println!("Listing environments for project {}", project);
-            }
+            },
             EnvCommands::Create { key, name, project } => {
-                println!("Creating environment {} ({}) in project {}", key, name, project);
-            }
+                println!(
+                    "Creating environment {} ({}) in project {}",
+                    key, name, project
+                );
+            },
             EnvCommands::Delete { key, project } => {
                 println!("Deleting environment {} in project {}", key, project);
-            }
+            },
         },
         Commands::Eval { flag, env, user } => {
-            println!("Evaluating flag {} in env {} for user {:?}", flag, env, user);
-        }
+            println!(
+                "Evaluating flag {} in env {} for user {:?}",
+                flag, env, user
+            );
+        },
         Commands::Kill { flag, env, reason } => {
             println!("🛑 KILL SWITCH: {} in {} - Reason: {}", flag, env, reason);
-        }
+        },
         Commands::Export { project, format } => {
             println!("Exporting project {} as {}", project, format);
-        }
-        Commands::Import { file, project, mode } => {
-            println!("Importing {} to project {} with mode {}", file, project, mode);
-        }
+        },
+        Commands::Import {
+            file,
+            project,
+            mode,
+        } => {
+            println!(
+                "Importing {} to project {} with mode {}",
+                file, project, mode
+            );
+        },
         Commands::Diff { project, from, to } => {
             println!("Comparing {} vs {} in project {}", from, to, project);
-        }
+        },
         Commands::Sync { project, from, to } => {
             println!("Syncing {} to {} in project {}", from, to, project);
-        }
+        },
     }
 }

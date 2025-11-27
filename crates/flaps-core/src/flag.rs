@@ -266,7 +266,11 @@ impl Flag {
     }
 
     /// Adds an environment configuration.
-    pub fn with_environment(mut self, env_key: impl Into<String>, config: EnvironmentConfig) -> Self {
+    pub fn with_environment(
+        mut self,
+        env_key: impl Into<String>,
+        config: EnvironmentConfig,
+    ) -> Self {
         self.environments.insert(env_key.into(), config);
         self
     }
@@ -282,7 +286,7 @@ impl Flag {
             FlagType::Boolean => FlagValue::Boolean(false),
             FlagType::String { variants } => {
                 FlagValue::String(variants.first().cloned().unwrap_or_default())
-            }
+            },
         }
     }
 }

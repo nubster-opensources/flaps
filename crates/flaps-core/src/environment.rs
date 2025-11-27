@@ -57,11 +57,7 @@ pub struct Environment {
 
 impl Environment {
     /// Creates a new environment.
-    pub fn new(
-        key: impl Into<String>,
-        name: impl Into<String>,
-        project_id: ProjectId,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, name: impl Into<String>, project_id: ProjectId) -> Self {
         Self {
             id: EnvironmentId::new(),
             key: key.into(),

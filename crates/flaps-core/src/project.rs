@@ -114,11 +114,7 @@ pub struct Group {
 
 impl Group {
     /// Creates a new group.
-    pub fn new(
-        key: impl Into<String>,
-        name: impl Into<String>,
-        tenant_id: TenantId,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, name: impl Into<String>, tenant_id: TenantId) -> Self {
         Self {
             id: GroupId::new(),
             key: key.into(),
@@ -162,11 +158,7 @@ pub struct Project {
 
 impl Project {
     /// Creates a new project.
-    pub fn new(
-        key: impl Into<String>,
-        name: impl Into<String>,
-        tenant_id: TenantId,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, name: impl Into<String>, tenant_id: TenantId) -> Self {
         let now = Utc::now();
         Self {
             id: ProjectId::new(),
@@ -213,8 +205,7 @@ mod tests {
     fn test_create_project_with_group() {
         let tenant_id = TenantId::new();
         let group = Group::new("client-a", "Client A", tenant_id);
-        let project = Project::new("client-a-api", "Client A API", tenant_id)
-            .with_group(group.id);
+        let project = Project::new("client-a-api", "Client A API", tenant_id).with_group(group.id);
 
         assert_eq!(project.group_id, Some(group.id));
     }

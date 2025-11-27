@@ -212,7 +212,9 @@ impl Evaluator {
         }
 
         // All conditions must match (AND logic)
-        rule.conditions.iter().all(|c| self.evaluate_condition(c, context))
+        rule.conditions
+            .iter()
+            .all(|c| self.evaluate_condition(c, context))
     }
 
     /// Evaluates a single condition against the context.
@@ -253,28 +255,31 @@ impl Evaluator {
             Operator::NotEquals => !self.values_equal(actual, expected),
 
             Operator::Contains => {
-                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str()) {
+                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str())
+                {
                     actual_str.contains(expected_str)
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::StartsWith => {
-                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str()) {
+                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str())
+                {
                     actual_str.starts_with(expected_str)
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::EndsWith => {
-                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str()) {
+                if let (Some(actual_str), Some(expected_str)) = (actual.as_str(), expected.as_str())
+                {
                     actual_str.ends_with(expected_str)
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::In => {
                 if let Some(list) = expected.as_string_list() {
@@ -286,7 +291,7 @@ impl Evaluator {
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::NotIn => {
                 if let Some(list) = expected.as_string_list() {
@@ -298,54 +303,62 @@ impl Evaluator {
                 } else {
                     true
                 }
-            }
+            },
 
             Operator::GreaterThan => {
-                if let (Some(actual_num), Some(expected_num)) = (actual.as_number(), expected.as_number()) {
+                if let (Some(actual_num), Some(expected_num)) =
+                    (actual.as_number(), expected.as_number())
+                {
                     actual_num > expected_num
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::GreaterThanOrEqual => {
-                if let (Some(actual_num), Some(expected_num)) = (actual.as_number(), expected.as_number()) {
+                if let (Some(actual_num), Some(expected_num)) =
+                    (actual.as_number(), expected.as_number())
+                {
                     actual_num >= expected_num
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::LessThan => {
-                if let (Some(actual_num), Some(expected_num)) = (actual.as_number(), expected.as_number()) {
+                if let (Some(actual_num), Some(expected_num)) =
+                    (actual.as_number(), expected.as_number())
+                {
                     actual_num < expected_num
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::LessThanOrEqual => {
-                if let (Some(actual_num), Some(expected_num)) = (actual.as_number(), expected.as_number()) {
+                if let (Some(actual_num), Some(expected_num)) =
+                    (actual.as_number(), expected.as_number())
+                {
                     actual_num <= expected_num
                 } else {
                     false
                 }
-            }
+            },
 
             Operator::SemverGreaterThan | Operator::SemverLessThan => {
                 // TODO: Implement semver comparison
                 false
-            }
+            },
 
             Operator::Regex => {
                 // TODO: Implement regex matching
                 false
-            }
+            },
 
             Operator::MatchesSegment | Operator::NotMatchesSegment => {
                 // Handled above
                 false
-            }
+            },
         }
     }
 
@@ -360,7 +373,11 @@ impl Evaluator {
     }
 
     /// Evaluates if a user belongs to a segment.
-    fn evaluate_segment_membership(&self, segment_id: SegmentId, context: &EvaluationContext) -> bool {
+    fn evaluate_segment_membership(
+        &self,
+        segment_id: SegmentId,
+        context: &EvaluationContext,
+    ) -> bool {
         let segment = match self.segments.get(&segment_id) {
             Some(s) => s,
             None => return false, // Segment not found
@@ -432,9 +449,14 @@ mod tests {
     use super::*;
 
     fn create_test_flag() -> Flag {
-        Flag::new_boolean("test-flag", "Test Flag", ProjectId::new(), UserId::new("creator"))
-            .with_environment("dev", EnvironmentConfig::enabled_boolean(true))
-            .with_environment("prod", EnvironmentConfig::disabled())
+        Flag::new_boolean(
+            "test-flag",
+            "Test Flag",
+            ProjectId::new(),
+            UserId::new("creator"),
+        )
+        .with_environment("dev", EnvironmentConfig::enabled_boolean(true))
+        .with_environment("prod", EnvironmentConfig::disabled())
     }
 
     #[test]
@@ -473,26 +495,28 @@ mod tests {
     #[test]
     fn test_evaluate_with_targeting_rule() {
         let evaluator = Evaluator::new();
-        let flag = Flag::new_boolean("premium-feature", "Premium Feature", ProjectId::new(), UserId::new("creator"))
-            .with_environment(
-                "prod",
-                EnvironmentConfig::enabled_boolean(false)
-                    .with_rule(
-                        TargetingRule::new(1, FlagValue::Boolean(true))
-                            .with_condition(Condition::equals("plan", "pro"))
-                    )
-            );
+        let flag = Flag::new_boolean(
+            "premium-feature",
+            "Premium Feature",
+            ProjectId::new(),
+            UserId::new("creator"),
+        )
+        .with_environment(
+            "prod",
+            EnvironmentConfig::enabled_boolean(false).with_rule(
+                TargetingRule::new(1, FlagValue::Boolean(true))
+                    .with_condition(Condition::equals("plan", "pro")),
+            ),
+        );
 
         // User with pro plan
-        let pro_context = EvaluationContext::with_user_id("user-1")
-            .set("plan", "pro");
+        let pro_context = EvaluationContext::with_user_id("user-1").set("plan", "pro");
         let result = evaluator.evaluate(&flag, "prod", &pro_context);
         assert!(result.is_enabled());
         assert_eq!(result.reason, EvaluationReason::TargetingMatch);
 
         // User with free plan
-        let free_context = EvaluationContext::with_user_id("user-2")
-            .set("plan", "free");
+        let free_context = EvaluationContext::with_user_id("user-2").set("plan", "free");
         let result = evaluator.evaluate(&flag, "prod", &free_context);
         assert!(!result.is_enabled());
         assert_eq!(result.reason, EvaluationReason::Default);
@@ -516,7 +540,11 @@ mod tests {
             }
         }
         // Should be roughly 50% (allow 10% margin for randomness)
-        assert!(in_count > 400 && in_count < 600, "Got {} in rollout", in_count);
+        assert!(
+            in_count > 400 && in_count < 600,
+            "Got {} in rollout",
+            in_count
+        );
     }
 
     #[test]

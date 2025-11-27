@@ -1,0 +1,33 @@
+# Clippy configuration for Flaps
+# https://doc.rust-lang.org/clippy/
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 25
+
+# Maximum lines in a function
+too-many-lines-threshold = 150
+
+# Maximum arguments in a function
+too-many-arguments-threshold = 7
+
+# Type complexity threshold
+type-complexity-threshold = 300
+
+# Disallowed methods (security)
+disallowed-methods = [
+    # Prefer explicit error handling
+    { path = "std::result::Result::unwrap", reason = "Use expect() with a message or proper error handling" },
+    { path = "std::option::Option::unwrap", reason = "Use expect() with a message or proper error handling" },
+]
+
+# Disallowed types
+disallowed-types = [
+    # Prefer parking_lot for better performance
+    # { path = "std::sync::Mutex", reason = "Use parking_lot::Mutex instead" },
+]
+
+# Documentation requirements
+missing-docs-in-crate-items = true
+
+# Allow certain patterns
+allow-unwrap-in-tests = true

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use flaps_core::{
-    EvaluationContext, EvaluationReason, EvaluationResult, Evaluator, Flag, FlagValue,
-    Segment, SegmentId,
+    EvaluationContext, EvaluationReason, EvaluationResult, Evaluator, Flag, FlagValue, Segment,
+    SegmentId,
 };
 
 use crate::config::Config;
@@ -43,16 +43,21 @@ impl FlapsClient {
 
     /// Creates a client in offline mode with preloaded flags.
     pub fn offline(flags: Vec<Flag>, segments: Vec<Segment>) -> Self {
-        let flags_map: HashMap<String, Flag> = flags.into_iter().map(|f| (f.key.0.clone(), f)).collect();
-        let segments_map: HashMap<SegmentId, Segment> = segments.into_iter().map(|s| (s.id, s)).collect();
+        let flags_map: HashMap<String, Flag> =
+            flags.into_iter().map(|f| (f.key.0.clone(), f)).collect();
+        let segments_map: HashMap<SegmentId, Segment> =
+            segments.into_iter().map(|s| (s.id, s)).collect();
 
         Self {
             config: Config::default().offline(),
-            evaluator: Evaluator::with_segments(
-                segments_map.values().cloned().collect()
-            ),
+            evaluator: Evaluator::with_segments(segments_map.values().cloned().collect()),
             flags: Arc::new(RwLock::new(flags_map)),
-            segments: Arc::new(RwLock::new(segments_map.into_iter().map(|(_, s)| (s.key.clone(), s)).collect())),
+            segments: Arc::new(RwLock::new(
+                segments_map
+                    .into_values()
+                    .map(|s| (s.key.clone(), s))
+                    .collect(),
+            )),
         }
     }
 
@@ -66,7 +71,9 @@ impl FlapsClient {
         let flags = self.flags.read().await;
 
         match flags.get(flag_key) {
-            Some(flag) => self.evaluator.evaluate(flag, &self.config.environment, context),
+            Some(flag) => self
+                .evaluator
+                .evaluate(flag, &self.config.environment, context),
             None => EvaluationResult::flag_not_found(),
         }
     }
@@ -77,7 +84,12 @@ impl FlapsClient {
     }
 
     /// Returns the boolean value of a flag, or the default if not found or disabled.
-    pub async fn get_bool(&self, flag_key: &str, context: &EvaluationContext, default: bool) -> bool {
+    pub async fn get_bool(
+        &self,
+        flag_key: &str,
+        context: &EvaluationContext,
+        default: bool,
+    ) -> bool {
         let result = self.evaluate(flag_key, context).await;
         match result.reason {
             EvaluationReason::FlagNotFound | EvaluationReason::EnvironmentNotFound => default,
@@ -86,11 +98,22 @@ impl FlapsClient {
     }
 
     /// Returns the string value of a flag, or the default if not found or disabled.
-    pub async fn get_string(&self, flag_key: &str, context: &EvaluationContext, default: &str) -> String {
+    pub async fn get_string(
+        &self,
+        flag_key: &str,
+        context: &EvaluationContext,
+        default: &str,
+    ) -> String {
         let result = self.evaluate(flag_key, context).await;
         match result.reason {
-            EvaluationReason::FlagNotFound | EvaluationReason::EnvironmentNotFound => default.to_string(),
-            _ => result.value.as_str().map(|s| s.to_string()).unwrap_or_else(|| default.to_string()),
+            EvaluationReason::FlagNotFound | EvaluationReason::EnvironmentNotFound => {
+                default.to_string()
+            },
+            _ => result
+                .value
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| default.to_string()),
         }
     }
 
@@ -106,7 +129,9 @@ impl FlapsClient {
         let mut results = HashMap::new();
 
         for (key, flag) in flags.iter() {
-            let result = self.evaluator.evaluate(flag, &self.config.environment, context);
+            let result = self
+                .evaluator
+                .evaluate(flag, &self.config.environment, context);
             results.insert(key.clone(), result.value);
         }
 
@@ -154,21 +179,18 @@ pub enum FlapsError {
 
 #[cfg(test)]
 mod tests {
-    use flaps_core::{
-        environment::EnvironmentConfig,
-        flag::UserId,
-        project::ProjectId,
-    };
+    use flaps_core::{environment::EnvironmentConfig, flag::UserId, project::ProjectId};
 
     use super::*;
 
     #[tokio::test]
     async fn test_offline_client() {
         let project_id = ProjectId::new();
-        let flags = vec![
-            Flag::new_boolean("test-flag", "Test Flag", project_id, UserId::new("test"))
-                .with_environment("dev", EnvironmentConfig::enabled_boolean(true)),
-        ];
+        let flags =
+            vec![
+                Flag::new_boolean("test-flag", "Test Flag", project_id, UserId::new("test"))
+                    .with_environment("dev", EnvironmentConfig::enabled_boolean(true)),
+            ];
 
         let client = FlapsClient::offline(flags, vec![]);
         let context = EvaluationContext::with_user_id("user-1");
@@ -180,10 +202,11 @@ mod tests {
     #[tokio::test]
     async fn test_get_bool_with_default() {
         let project_id = ProjectId::new();
-        let flags = vec![
-            Flag::new_boolean("enabled-flag", "Enabled", project_id, UserId::new("test"))
-                .with_environment("dev", EnvironmentConfig::enabled_boolean(true)),
-        ];
+        let flags =
+            vec![
+                Flag::new_boolean("enabled-flag", "Enabled", project_id, UserId::new("test"))
+                    .with_environment("dev", EnvironmentConfig::enabled_boolean(true)),
+            ];
 
         let client = FlapsClient::offline(flags, vec![]);
         let context = EvaluationContext::new();
