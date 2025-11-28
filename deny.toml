@@ -1,0 +1,64 @@
+# cargo-deny configuration for Flaps
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run: cargo deny check advisories bans sources
+# (Skip license check - BSL-1.1 is not a valid SPDX identifier)
+#
+# Compatible with cargo-deny 0.18.x
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+# =============================================================================
+# Advisories - Check for known vulnerabilities
+# =============================================================================
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # Unmaintained crates with no fix available (transitive dependencies)
+    "RUSTSEC-2025-0120", # json5 - via config crate, consider switching to figment later
+]
+
+# =============================================================================
+# Bans - Deny specific crates or versions
+# =============================================================================
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+deny = [
+    # Crates with known issues
+    # { name = "openssl", wrappers = [] },
+]
+
+skip = [
+    # Allow multiple versions of these crates if needed
+    # { name = "syn", version = "1.0" },
+]
+
+skip-tree = [
+    # Skip entire dependency trees
+    # { name = "windows-sys" },
+]
+
+# =============================================================================
+# Sources - Restrict where crates can come from
+# =============================================================================
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# [sources.allow-org]
+# github = [
+#     "nubster-opensources",
+# ]

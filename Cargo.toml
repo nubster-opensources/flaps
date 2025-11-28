@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flaps-core",
+    "crates/flaps-storage",
+    "crates/flaps-server",
+    "crates/flaps-cli",
+    "crates/flaps-sdk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Synarion Technologies <contact@synarion.io>"]
+license = "BSL-1.1"
+repository = "https://github.com/nubster-opensources/flaps"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+
+# Database (0.8+ fixes RUSTSEC-2024-0363, default-features=false avoids mysql/rsa RUSTSEC-2023-0071)
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# UUID & Time
+uuid = { version = "1.6", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hashing (for rollout percentage)
+murmur3 = "0.5"
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Testing
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

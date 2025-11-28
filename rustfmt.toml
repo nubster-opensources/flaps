@@ -1,0 +1,23 @@
+# Rustfmt configuration for Flaps
+# https://rust-lang.github.io/rustfmt/
+#
+# Note: Only stable options are used here.
+# For nightly features, add them conditionally.
+
+edition = "2021"
+
+# Line width
+max_width = 100
+use_small_heuristics = "Default"
+
+# Imports (stable options only)
+reorder_imports = true
+reorder_modules = true
+
+# Formatting
+newline_style = "Auto"
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# Match
+match_block_trailing_comma = true
