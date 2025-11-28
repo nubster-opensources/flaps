@@ -39,7 +39,7 @@ pub use context::EvaluationContext;
 pub use environment::{Environment, EnvironmentConfig, EnvironmentId};
 pub use errors::FlapsError;
 pub use evaluation::{EvaluationReason, EvaluationResult, Evaluator};
-pub use flag::{Flag, FlagId, FlagKey, FlagType, FlagValue};
+pub use flag::{Flag, FlagId, FlagKey, FlagType, FlagValue, UserId};
 pub use project::{Group, GroupId, Project, ProjectId, TenantId};
 pub use rule::{AttributeValue, Condition, Operator, RuleId, TargetingRule};
 pub use segment::{Segment, SegmentId, SegmentRule};

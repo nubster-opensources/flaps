@@ -37,8 +37,11 @@ axum = { version = "0.7", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Database (0.8+ fixes RUSTSEC-2024-0363, default-features=false avoids mysql/rsa RUSTSEC-2023-0071)
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json", "migrate"] }
 
 # Redis
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
