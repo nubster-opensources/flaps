@@ -3,122 +3,138 @@
 use std::future::Future;
 
 use flaps_core::{
-    Environment, Flag, FlagId, FlagKey, Group, GroupId, Project, ProjectId, Result, Segment,
-    SegmentId, TenantId,
+    Environment, EnvironmentId, Flag, FlagId, FlagKey, Project, ProjectId, Segment, SegmentId,
+    TenantId,
 };
+
+use crate::error::StorageResult;
+
+// =============================================================================
+// Workspace Integration (External API)
+// =============================================================================
+
+/// Client for interacting with the Nubster Workspace API.
+///
+/// Projects, tenants, and groups are managed by the Workspace service.
+/// Flaps fetches this data via the Workspace API rather than storing it locally.
+pub trait WorkspaceClient: Send + Sync {
+    /// Gets a project by ID from Workspace.
+    fn get_project(
+        &self,
+        id: ProjectId,
+    ) -> impl Future<Output = StorageResult<Option<Project>>> + Send;
+
+    /// Lists all projects accessible to the current tenant.
+    fn list_projects(
+        &self,
+        tenant_id: TenantId,
+    ) -> impl Future<Output = StorageResult<Vec<Project>>> + Send;
+
+    /// Validates that a project exists and belongs to the tenant.
+    fn validate_project_access(
+        &self,
+        tenant_id: TenantId,
+        project_id: ProjectId,
+    ) -> impl Future<Output = StorageResult<bool>> + Send;
+}
+
+// =============================================================================
+// Local Repositories (Flaps-specific data)
+// =============================================================================
 
 /// Repository for flag operations.
 pub trait FlagRepository: Send + Sync {
     /// Gets a flag by ID.
-    fn get_by_id(&self, id: FlagId) -> impl Future<Output = Result<Option<Flag>>> + Send;
+    fn get_by_id(&self, id: FlagId) -> impl Future<Output = StorageResult<Option<Flag>>> + Send;
 
     /// Gets a flag by key within a project.
     fn get_by_key(
         &self,
         project_id: ProjectId,
         key: &FlagKey,
-    ) -> impl Future<Output = Result<Option<Flag>>> + Send;
+    ) -> impl Future<Output = StorageResult<Option<Flag>>> + Send;
 
     /// Lists all flags in a project.
     fn list_by_project(
         &self,
         project_id: ProjectId,
-    ) -> impl Future<Output = Result<Vec<Flag>>> + Send;
+    ) -> impl Future<Output = StorageResult<Vec<Flag>>> + Send;
 
     /// Creates a new flag.
-    fn create(&self, flag: &Flag) -> impl Future<Output = Result<()>> + Send;
+    fn create(&self, flag: &Flag) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Updates an existing flag.
-    fn update(&self, flag: &Flag) -> impl Future<Output = Result<()>> + Send;
+    fn update(&self, flag: &Flag) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Deletes a flag.
-    fn delete(&self, id: FlagId) -> impl Future<Output = Result<()>> + Send;
+    fn delete(&self, id: FlagId) -> impl Future<Output = StorageResult<()>> + Send;
 }
 
 /// Repository for segment operations.
 pub trait SegmentRepository: Send + Sync {
     /// Gets a segment by ID.
-    fn get_by_id(&self, id: SegmentId) -> impl Future<Output = Result<Option<Segment>>> + Send;
+    fn get_by_id(
+        &self,
+        id: SegmentId,
+    ) -> impl Future<Output = StorageResult<Option<Segment>>> + Send;
+
+    /// Gets a segment by key within a project.
+    fn get_by_key(
+        &self,
+        project_id: ProjectId,
+        key: &str,
+    ) -> impl Future<Output = StorageResult<Option<Segment>>> + Send;
 
     /// Lists all segments in a project.
     fn list_by_project(
         &self,
         project_id: ProjectId,
-    ) -> impl Future<Output = Result<Vec<Segment>>> + Send;
+    ) -> impl Future<Output = StorageResult<Vec<Segment>>> + Send;
 
     /// Creates a new segment.
-    fn create(&self, segment: &Segment) -> impl Future<Output = Result<()>> + Send;
+    fn create(&self, segment: &Segment) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Updates an existing segment.
-    fn update(&self, segment: &Segment) -> impl Future<Output = Result<()>> + Send;
+    fn update(&self, segment: &Segment) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Deletes a segment.
-    fn delete(&self, id: SegmentId) -> impl Future<Output = Result<()>> + Send;
-}
-
-/// Repository for project operations.
-pub trait ProjectRepository: Send + Sync {
-    /// Gets a project by ID.
-    fn get_by_id(&self, id: ProjectId) -> impl Future<Output = Result<Option<Project>>> + Send;
-
-    /// Lists all projects in a tenant.
-    fn list_by_tenant(
-        &self,
-        tenant_id: TenantId,
-    ) -> impl Future<Output = Result<Vec<Project>>> + Send;
-
-    /// Lists all projects in a group.
-    fn list_by_group(&self, group_id: GroupId)
-        -> impl Future<Output = Result<Vec<Project>>> + Send;
-
-    /// Creates a new project.
-    fn create(&self, project: &Project) -> impl Future<Output = Result<()>> + Send;
-
-    /// Updates an existing project.
-    fn update(&self, project: &Project) -> impl Future<Output = Result<()>> + Send;
-
-    /// Deletes a project.
-    fn delete(&self, id: ProjectId) -> impl Future<Output = Result<()>> + Send;
+    fn delete(&self, id: SegmentId) -> impl Future<Output = StorageResult<()>> + Send;
 }
 
 /// Repository for environment operations.
 pub trait EnvironmentRepository: Send + Sync {
+    /// Gets an environment by ID.
+    fn get_by_id(
+        &self,
+        id: EnvironmentId,
+    ) -> impl Future<Output = StorageResult<Option<Environment>>> + Send;
+
+    /// Gets an environment by key within a project.
+    fn get_by_key(
+        &self,
+        project_id: ProjectId,
+        key: &str,
+    ) -> impl Future<Output = StorageResult<Option<Environment>>> + Send;
+
     /// Lists all environments in a project.
     fn list_by_project(
         &self,
         project_id: ProjectId,
-    ) -> impl Future<Output = Result<Vec<Environment>>> + Send;
+    ) -> impl Future<Output = StorageResult<Vec<Environment>>> + Send;
 
     /// Creates a new environment.
-    fn create(&self, environment: &Environment) -> impl Future<Output = Result<()>> + Send;
+    fn create(&self, environment: &Environment) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Updates an existing environment.
-    fn update(&self, environment: &Environment) -> impl Future<Output = Result<()>> + Send;
+    fn update(&self, environment: &Environment) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Deletes an environment.
-    fn delete(&self, id: flaps_core::EnvironmentId) -> impl Future<Output = Result<()>> + Send;
+    fn delete(&self, id: EnvironmentId) -> impl Future<Output = StorageResult<()>> + Send;
 }
 
-/// Repository for group operations.
-pub trait GroupRepository: Send + Sync {
-    /// Gets a group by ID.
-    fn get_by_id(&self, id: GroupId) -> impl Future<Output = Result<Option<Group>>> + Send;
-
-    /// Lists all groups in a tenant.
-    fn list_by_tenant(
-        &self,
-        tenant_id: TenantId,
-    ) -> impl Future<Output = Result<Vec<Group>>> + Send;
-
-    /// Creates a new group.
-    fn create(&self, group: &Group) -> impl Future<Output = Result<()>> + Send;
-
-    /// Updates an existing group.
-    fn update(&self, group: &Group) -> impl Future<Output = Result<()>> + Send;
-
-    /// Deletes a group.
-    fn delete(&self, id: GroupId) -> impl Future<Output = Result<()>> + Send;
-}
+// =============================================================================
+// Cache Layer
+// =============================================================================
 
 /// Cache for flag configurations.
 pub trait FlagCache: Send + Sync {
@@ -127,7 +143,7 @@ pub trait FlagCache: Send + Sync {
         &self,
         project_id: ProjectId,
         environment: &str,
-    ) -> impl Future<Output = Result<Option<Vec<Flag>>>> + Send;
+    ) -> impl Future<Output = StorageResult<Option<Vec<Flag>>>> + Send;
 
     /// Sets cached flags for a project/environment.
     fn set(
@@ -135,12 +151,13 @@ pub trait FlagCache: Send + Sync {
         project_id: ProjectId,
         environment: &str,
         flags: &[Flag],
-    ) -> impl Future<Output = Result<()>> + Send;
+        ttl_secs: u64,
+    ) -> impl Future<Output = StorageResult<()>> + Send;
 
     /// Invalidates cache for a project/environment.
     fn invalidate(
         &self,
         project_id: ProjectId,
         environment: Option<&str>,
-    ) -> impl Future<Output = Result<()>> + Send;
+    ) -> impl Future<Output = StorageResult<()>> + Send;
 }
