@@ -105,19 +105,14 @@ impl UserId {
 }
 
 /// Type of value a flag can return.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "variants")]
 pub enum FlagType {
     /// Simple on/off flag.
+    #[default]
     Boolean,
     /// String flag with defined variants (for A/B testing).
     String { variants: Vec<String> },
-}
-
-impl Default for FlagType {
-    fn default() -> Self {
-        Self::Boolean
-    }
 }
 
 /// Value returned by a flag evaluation.

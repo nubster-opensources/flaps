@@ -5,7 +5,6 @@
 ignore = [
     # Unmaintained crates with no fix available (transitive dependencies)
     "RUSTSEC-2025-0120", # json5 - via config crate, consider switching to figment later
-    # sqlx-macros-core pulls in all database drivers for compile-time checking
-    # We don't use MySQL at runtime, this is compile-time only
-    "RUSTSEC-2023-0071", # rsa via sqlx-mysql (compile-time macro dependency)
+    # sqlx-macros-core pulls in sqlx-mysql for compile-time checking (not runtime)
+    "RUSTSEC-2023-0071", # rsa via sqlx-mysql (compile-time macro dependency only)
 ]
