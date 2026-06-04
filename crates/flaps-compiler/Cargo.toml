@@ -1,0 +1,17 @@
+[package]
+name = "flaps-compiler"
+description = "Compiler from the Flaps domain model to canonical flagd rulesets: one versioned and hashed artifact per environment with inlined segments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

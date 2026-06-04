@@ -1,0 +1,21 @@
+[package]
+name = "flapsd"
+description = "Flaps server daemon: TOML configuration, first admin bootstrap and process wiring for the Flaps feature flag platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "flapsd"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

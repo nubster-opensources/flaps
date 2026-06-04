@@ -1,0 +1,17 @@
+[package]
+name = "flaps-domain"
+description = "Rich domain model for the Flaps feature flag platform: projects, environments, flags, variants, segments, rules and SDK keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
