@@ -19,10 +19,12 @@ Flaps follows the Nubster general coding standards documented in [nubster-docs](
 # Pin the Rust toolchain via rustup
 rustup show
 
-# Install local git hooks
-lefthook install
+# Install the commit-msg hook (runs cog verify on every commit)
+cog install-hook commit-msg
 
-# Run tests
+# Local checks before pushing
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 

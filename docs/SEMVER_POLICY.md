@@ -28,8 +28,8 @@ The headline published crates are `flaps-eval` and `flaps-client`. The public AP
 - Public re-exports from sibling crates (the facade crate `flaps` re-exports curated items).
 - The on-disk schema produced by store migrations. Schema changes that require migration are treated as breaking changes.
 - The OFREP-compatible REST API surface under `/v1/`.
-- The webhook payload schema and HMAC signature scheme.
-- The CloudEvents payload schema for outgoing events.
+- The compiled ruleset format produced by the compiler pipeline.
+- The admin REST API surface once it is published.
 
 Items that are explicitly NOT part of the public API:
 

@@ -17,13 +17,12 @@ Flaps is a feature-flag evaluation library and server. Its threat model covers t
 
 The following attack surfaces are explicitly in scope:
 
-- **OFREP API** (`/v1/`), including authorization bypass, tenant isolation, and uncontrolled memory growth on large flag payloads.
+- **OFREP evaluation API** (`/v1/`), including authorization bypass and uncontrolled memory growth on large flag payloads.
+- **Admin REST API and its authentication**, including privilege escalation, insecure direct object references and unauthenticated access to management endpoints.
+- **SDK key handling**, including keys that must be stored hashed and revocation that must take effect immediately.
 - **Flag evaluation engine** (`flaps-eval`), including rule injection through crafted flag definitions, targeting rule bypass and unbounded recursion in nested flag references.
 - **Compiler pipeline** (`flaps-compiler`), including malformed input causing panics or unbounded memory allocation.
-- **Store layer** (`flaps-store`), including cross-tenant data access through forged identifiers and SQL injection vectors.
-- **Webhook signing** (HMAC SHA-256), including replay and timing attacks on signature verification.
-- **OIDC and JWKS validation**, including key confusion, `alg=none` and unsigned `kid` substitution.
-- **Multi-tenant isolation** at the store and evaluation layers, including cross-tenant flag access through forged identifiers.
+- **SQL store** (`flaps-store`), including SQL injection vectors and unauthorised data access through forged identifiers.
 
 The following are assumed safe by the threat model:
 
