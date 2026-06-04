@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Flaps repository tooling: release pre-flight checks and doc generation."
+description = "Flaps repository tooling: release pre-flight checks."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
