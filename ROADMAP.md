@@ -1,6 +1,6 @@
 # Roadmap
 
-Milestones track the GitHub milestones of this repository.
+This document tracks the milestones of the repository issue tracker.
 
 ## M0: Foundations (current)
 
