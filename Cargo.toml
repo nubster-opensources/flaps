@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/flaps-domain",
+    "crates/flaps-eval",
+    "crates/flaps-compiler",
+    "crates/flaps-store",
+    "crates/flaps-client",
+    "crates/flaps-server",
+    "crates/flapsd",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nubster-opensources/flaps"
+homepage = "https://github.com/nubster-opensources/flaps"
+authors = ["Nubster"]
+keywords = ["feature-flags", "openfeature", "ofrep", "flagd", "feature-toggles"]
+categories = ["web-programming", "config", "development-tools"]
+
+[workspace.dependencies]
+# Intra-workspace crates
+flaps-domain = { version = "0.1.0", path = "crates/flaps-domain" }
+flaps-eval = { version = "0.1.0", path = "crates/flaps-eval" }
+flaps-compiler = { version = "0.1.0", path = "crates/flaps-compiler" }
+flaps-store = { version = "0.1.0", path = "crates/flaps-store" }
+flaps-client = { version = "0.1.0", path = "crates/flaps-client" }
+flaps-server = { version = "0.1.0", path = "crates/flaps-server" }
+
+# Foundation (each v0.1.0 work batch adds its own dependencies here)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "fs", "io-util"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+semicolon_if_nothing_returned = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
