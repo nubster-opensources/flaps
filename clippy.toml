@@ -1,0 +1,27 @@
+msrv = "1.88"
+
+doc-valid-idents = [
+    "..",
+    "Flaps",
+    "Nubster",
+    "Hexeract",
+    "LightShuttle",
+    "OpenFeature",
+    "OFREP",
+    "JsonLogic",
+    "PostgreSQL",
+    "SQLite",
+    "SQLx",
+    "OpenTelemetry",
+    "OIDC",
+    "CloudEvents",
+    "SemVer",
+    "SSE",
+    "ETag",
+    "TOML",
+    "HTMX",
+    "Askama",
+    "TLS",
+    "JWT",
+    "GitOps",
+]
