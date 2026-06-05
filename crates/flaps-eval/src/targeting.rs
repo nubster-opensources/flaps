@@ -182,8 +182,8 @@ impl<'de> Deserialize<'de> for Rule {
     where
         D: Deserializer<'de>,
     {
-        let _ = deserializer;
-        todo!()
+        let value = serde_json::Value::deserialize(deserializer)?;
+        crate::parse::rule("$", &value).map_err(serde::de::Error::custom)
     }
 }
 
