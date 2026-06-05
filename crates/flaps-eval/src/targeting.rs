@@ -19,6 +19,12 @@ pub enum Rule {
     /// A literal JSON value.
     Literal(Literal),
 
+    /// An array of expressions, evaluated element by element.
+    ///
+    /// JsonLogic evaluates arrays recursively, so `["a", {"var": "x"}]` is a
+    /// valid expression producing a two element array.
+    Array(Vec<Rule>),
+
     /// `var`: reads an attribute from the evaluation context.
     ///
     /// Supports dotted paths (`"user.email"`) and the flagd injected
@@ -202,8 +208,6 @@ pub enum Literal {
     Number(f64),
     /// A JSON string.
     String(String),
-    /// A JSON array of literals.
-    Array(Vec<Literal>),
 }
 
 /// A semantic version comparison operator.

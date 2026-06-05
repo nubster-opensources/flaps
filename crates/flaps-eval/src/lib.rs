@@ -20,6 +20,7 @@
 
 mod error;
 mod model;
+mod parse;
 mod targeting;
 
 pub use error::ParseError;

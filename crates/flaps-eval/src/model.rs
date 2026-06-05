@@ -27,8 +27,8 @@ impl FlagSet {
     /// mixed variant types and unresolved or cyclic `$evaluators` references
     /// are rejected with a structured [`ParseError`].
     pub fn from_json(document: &str) -> Result<Self, ParseError> {
-        let _ = document;
-        todo!()
+        let value: serde_json::Value = serde_json::from_str(document)?;
+        crate::parse::flag_set(&value)
     }
 
     /// Serializes the flag set back to canonical flagd JSON.
