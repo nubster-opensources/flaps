@@ -21,6 +21,7 @@
 mod error;
 mod model;
 mod parse;
+mod serialize;
 mod targeting;
 
 pub use error::ParseError;

@@ -183,7 +183,7 @@ impl<'de> Deserialize<'de> for Rule {
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        crate::parse::rule("$", &value).map_err(serde::de::Error::custom)
+        crate::parse::standalone_rule("$", &value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -192,8 +192,7 @@ impl Serialize for Rule {
     where
         S: Serializer,
     {
-        let _ = serializer;
-        todo!()
+        crate::serialize::rule_value(self).serialize(serializer)
     }
 }
 

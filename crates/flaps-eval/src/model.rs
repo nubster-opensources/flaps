@@ -34,7 +34,7 @@ impl FlagSet {
     /// Serializes the flag set back to canonical flagd JSON.
     #[must_use]
     pub fn to_json(&self) -> String {
-        todo!()
+        crate::serialize::flag_set_value(self).to_string()
     }
 }
 

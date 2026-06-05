@@ -2,6 +2,8 @@
 //!
 //! All functions thread the JSON path of the element under inspection so
 //! that every error pinpoints the offending location in the source document.
+//! Reusable rules declared under `$evaluators` are resolved while parsing:
+//! a successfully parsed flag set never contains references.
 
 use std::collections::BTreeMap;
 
@@ -14,9 +16,31 @@ use crate::targeting::{Bucket, Literal, Rule, SemVerOp};
 type RulePair = (Box<Rule>, Box<Rule>);
 type RuleTriple = (Box<Rule>, Box<Rule>, Box<Rule>);
 
+/// Parses targeting rules, resolving `$evaluators` references on the fly.
+///
+/// Without an evaluator table (standalone rule deserialization) references
+/// are kept verbatim as [`Rule::Ref`].
+struct RuleParser<'a> {
+    evaluators: Option<&'a serde_json::Map<String, Value>>,
+    resolving: Vec<String>,
+}
+
 pub(crate) fn flag_set(value: &Value) -> Result<FlagSet, ParseError> {
     let Value::Object(root) = value else {
         return Err(invalid("$", "the document root must be an object"));
+    };
+
+    let evaluators = match root.get("$evaluators") {
+        None => None,
+        Some(Value::Object(entries)) => Some(entries),
+        Some(_) => {
+            return Err(invalid("$evaluators", "`$evaluators` must be an object"));
+        }
+    };
+    let empty = serde_json::Map::new();
+    let mut parser = RuleParser {
+        evaluators: Some(evaluators.unwrap_or(&empty)),
+        resolving: Vec::new(),
     };
 
     let flags_value = root
@@ -29,7 +53,7 @@ pub(crate) fn flag_set(value: &Value) -> Result<FlagSet, ParseError> {
     let mut flags = BTreeMap::new();
     for (key, entry) in entries {
         let path = format!("flags.{key}");
-        flags.insert(key.clone(), flag(&path, key, entry)?);
+        flags.insert(key.clone(), flag(&mut parser, &path, key, entry)?);
     }
 
     let metadata = match root.get("metadata") {
@@ -40,7 +64,20 @@ pub(crate) fn flag_set(value: &Value) -> Result<FlagSet, ParseError> {
     Ok(FlagSet { flags, metadata })
 }
 
-fn flag(path: &str, key: &str, value: &Value) -> Result<Flag, ParseError> {
+pub(crate) fn standalone_rule(path: &str, value: &Value) -> Result<Rule, ParseError> {
+    RuleParser {
+        evaluators: None,
+        resolving: Vec::new(),
+    }
+    .rule(path, value)
+}
+
+fn flag(
+    parser: &mut RuleParser<'_>,
+    path: &str,
+    key: &str,
+    value: &Value,
+) -> Result<Flag, ParseError> {
     let Value::Object(properties) = value else {
         return Err(invalid(path, "a flag must be an object"));
     };
@@ -71,7 +108,7 @@ fn flag(path: &str, key: &str, value: &Value) -> Result<Flag, ParseError> {
     let targeting = match properties.get("targeting") {
         None => None,
         Some(Value::Object(map)) if map.is_empty() => None,
-        Some(value) => Some(rule(&format!("{path}.targeting"), value)?),
+        Some(value) => Some(parser.rule(&format!("{path}.targeting"), value)?),
     };
 
     let metadata = match properties.get("metadata") {
@@ -182,134 +219,354 @@ fn metadata(path: &str, value: &Value) -> Result<Metadata, ParseError> {
     Ok(metadata)
 }
 
-pub(crate) fn rule(path: &str, value: &Value) -> Result<Rule, ParseError> {
-    match value {
-        Value::Null => Ok(Rule::Literal(Literal::Null)),
-        Value::Bool(value) => Ok(Rule::Literal(Literal::Bool(*value))),
-        Value::Number(value) => {
-            let Some(value) = value.as_f64() else {
-                return Err(invalid(path, "number does not fit a 64 bit float"));
-            };
-            Ok(Rule::Literal(Literal::Number(value)))
+impl RuleParser<'_> {
+    fn rule(&mut self, path: &str, value: &Value) -> Result<Rule, ParseError> {
+        match value {
+            Value::Null => Ok(Rule::Literal(Literal::Null)),
+            Value::Bool(value) => Ok(Rule::Literal(Literal::Bool(*value))),
+            Value::Number(value) => {
+                let Some(value) = value.as_f64() else {
+                    return Err(invalid(path, "number does not fit a 64 bit float"));
+                };
+                Ok(Rule::Literal(Literal::Number(value)))
+            }
+            Value::String(value) => Ok(Rule::Literal(Literal::String(value.clone()))),
+            Value::Array(items) => Ok(Rule::Array(self.rules(path, items)?)),
+            Value::Object(map) => self.operation(path, map),
         }
-        Value::String(value) => Ok(Rule::Literal(Literal::String(value.clone()))),
-        Value::Array(items) => Ok(Rule::Array(rules(path, items)?)),
-        Value::Object(map) => operation(path, map),
     }
-}
 
-fn rules(path: &str, items: &[Value]) -> Result<Vec<Rule>, ParseError> {
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| rule(&format!("{path}[{index}]"), item))
-        .collect()
-}
-
-fn operation(path: &str, map: &serde_json::Map<String, Value>) -> Result<Rule, ParseError> {
-    let mut entries = map.iter();
-    let (Some((operator, args)), None) = (entries.next(), entries.next()) else {
-        return Err(invalid(
-            path,
-            "an operation must be an object with exactly one key",
-        ));
-    };
-
-    match operator.as_str() {
-        "$ref" | "var" | "missing" | "missing_some" | "if" => structural(path, operator, args),
-        "!" | "!!" | "and" | "or" => logic(path, operator, args),
-        "==" | "===" | "!=" | "!==" | ">" | ">=" | "<" | "<=" => comparison(path, operator, args),
-        "+" | "-" | "*" | "/" | "%" | "min" | "max" => arithmetic(path, operator, args),
-        "cat" | "substr" | "in" | "merge" | "map" | "filter" | "reduce" | "all" | "none"
-        | "some" => collection(path, operator, args),
-        "starts_with" | "ends_with" | "sem_ver" | "fractional" => custom(path, operator, args),
-        _ => Err(ParseError::UnknownOperator {
-            path: path.to_owned(),
-            operator: operator.clone(),
-        }),
+    fn rules(&mut self, path: &str, items: &[Value]) -> Result<Vec<Rule>, ParseError> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| self.rule(&format!("{path}[{index}]"), item))
+            .collect()
     }
-}
 
-fn structural(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "$ref" => match args {
-            Value::String(name) => Ok(Rule::Ref(name.clone())),
-            _ => Err(bad_args(&path, operator, "expects an evaluator name")),
-        },
-        "var" => var(&path, args),
-        "missing" => Ok(Rule::Missing(rules(&path, op_args(args))?)),
-        "missing_some" => missing_some(&path, args),
-        "if" => Ok(Rule::If(variadic(&path, operator, args, 2)?)),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn operation(
+        &mut self,
+        path: &str,
+        map: &serde_json::Map<String, Value>,
+    ) -> Result<Rule, ParseError> {
+        let mut entries = map.iter();
+        let (Some((operator, args)), None) = (entries.next(), entries.next()) else {
+            return Err(invalid(
+                path,
+                "an operation must be an object with exactly one key",
+            ));
+        };
+
+        match operator.as_str() {
+            "$ref" | "var" | "missing" | "missing_some" | "if" => {
+                self.structural(path, operator, args)
+            }
+            "!" | "!!" | "and" | "or" => self.logic(path, operator, args),
+            "==" | "===" | "!=" | "!==" | ">" | ">=" | "<" | "<=" => {
+                self.comparison(path, operator, args)
+            }
+            "+" | "-" | "*" | "/" | "%" | "min" | "max" => self.arithmetic(path, operator, args),
+            "cat" | "substr" | "in" | "merge" | "map" | "filter" | "reduce" | "all" | "none"
+            | "some" => self.collection(path, operator, args),
+            "starts_with" | "ends_with" | "sem_ver" | "fractional" => {
+                self.custom(path, operator, args)
+            }
+            _ => Err(ParseError::UnknownOperator {
+                path: path.to_owned(),
+                operator: operator.clone(),
+            }),
+        }
     }
-}
 
-fn logic(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "!" => Ok(Rule::Not(unary(&path, operator, args)?)),
-        "!!" => Ok(Rule::Truthy(unary(&path, operator, args)?)),
-        "and" => Ok(Rule::And(variadic(&path, operator, args, 1)?)),
-        "or" => Ok(Rule::Or(variadic(&path, operator, args, 1)?)),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn structural(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "$ref" => match args {
+                Value::String(name) => self.reference(&path, name),
+                _ => Err(bad_args(&path, operator, "expects an evaluator name")),
+            },
+            "var" => var(&path, args),
+            "missing" => Ok(Rule::Missing(self.rules(&path, op_args(args))?)),
+            "missing_some" => self.missing_some(&path, args),
+            "if" => Ok(Rule::If(self.variadic(&path, operator, args, 2)?)),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
     }
-}
 
-fn comparison(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "==" => binary(&path, operator, args).map(|(a, b)| Rule::Eq(a, b)),
-        "===" => binary(&path, operator, args).map(|(a, b)| Rule::StrictEq(a, b)),
-        "!=" => binary(&path, operator, args).map(|(a, b)| Rule::Neq(a, b)),
-        "!==" => binary(&path, operator, args).map(|(a, b)| Rule::StrictNeq(a, b)),
-        ">" => binary(&path, operator, args).map(|(a, b)| Rule::Gt(a, b)),
-        ">=" => binary(&path, operator, args).map(|(a, b)| Rule::Gte(a, b)),
-        "<" => Ok(Rule::Lt(bounded(&path, operator, args, 2, 3)?)),
-        "<=" => Ok(Rule::Lte(bounded(&path, operator, args, 2, 3)?)),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn reference(&mut self, path: &str, name: &str) -> Result<Rule, ParseError> {
+        let Some(evaluators) = self.evaluators else {
+            return Ok(Rule::Ref(name.to_owned()));
+        };
+        if self.resolving.iter().any(|resolving| resolving == name) {
+            return Err(ParseError::EvaluatorCycle {
+                reference: name.to_owned(),
+            });
+        }
+        let Some(definition) = evaluators.get(name) else {
+            return Err(ParseError::UnknownEvaluator {
+                path: path.to_owned(),
+                reference: name.to_owned(),
+            });
+        };
+        self.resolving.push(name.to_owned());
+        let resolved = self.rule(&format!("$evaluators.{name}"), definition);
+        self.resolving.pop();
+        resolved
     }
-}
 
-fn arithmetic(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "+" => Ok(Rule::Add(variadic(&path, operator, args, 1)?)),
-        "-" => Ok(Rule::Sub(bounded(&path, operator, args, 1, 2)?)),
-        "*" => Ok(Rule::Mul(variadic(&path, operator, args, 1)?)),
-        "/" => binary(&path, operator, args).map(|(a, b)| Rule::Div(a, b)),
-        "%" => binary(&path, operator, args).map(|(a, b)| Rule::Mod(a, b)),
-        "min" => Ok(Rule::Min(variadic(&path, operator, args, 1)?)),
-        "max" => Ok(Rule::Max(variadic(&path, operator, args, 1)?)),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn logic(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "!" => Ok(Rule::Not(self.unary(&path, operator, args)?)),
+            "!!" => Ok(Rule::Truthy(self.unary(&path, operator, args)?)),
+            "and" => Ok(Rule::And(self.variadic(&path, operator, args, 1)?)),
+            "or" => Ok(Rule::Or(self.variadic(&path, operator, args, 1)?)),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
     }
-}
 
-fn collection(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "cat" => Ok(Rule::Cat(variadic(&path, operator, args, 1)?)),
-        "substr" => Ok(Rule::Substr(bounded(&path, operator, args, 2, 3)?)),
-        "in" => binary(&path, operator, args).map(|(a, b)| Rule::In(a, b)),
-        "merge" => Ok(Rule::Merge(variadic(&path, operator, args, 1)?)),
-        "map" => binary(&path, operator, args).map(|(a, b)| Rule::Map(a, b)),
-        "filter" => binary(&path, operator, args).map(|(a, b)| Rule::Filter(a, b)),
-        "reduce" => ternary(&path, operator, args).map(|(a, b, c)| Rule::Reduce(a, b, c)),
-        "all" => binary(&path, operator, args).map(|(a, b)| Rule::All(a, b)),
-        "none" => binary(&path, operator, args).map(|(a, b)| Rule::None(a, b)),
-        "some" => binary(&path, operator, args).map(|(a, b)| Rule::Some(a, b)),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn comparison(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "==" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Eq(a, b)),
+            "===" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::StrictEq(a, b)),
+            "!=" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Neq(a, b)),
+            "!==" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::StrictNeq(a, b)),
+            ">" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Gt(a, b)),
+            ">=" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Gte(a, b)),
+            "<" => Ok(Rule::Lt(self.bounded(&path, operator, args, 2, 3)?)),
+            "<=" => Ok(Rule::Lte(self.bounded(&path, operator, args, 2, 3)?)),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
     }
-}
 
-fn custom(path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
-    let path = format!("{path}.{operator}");
-    match operator {
-        "starts_with" => binary(&path, operator, args).map(|(a, b)| Rule::StartsWith(a, b)),
-        "ends_with" => binary(&path, operator, args).map(|(a, b)| Rule::EndsWith(a, b)),
-        "sem_ver" => sem_ver(&path, args),
-        "fractional" => fractional(&path, args),
-        _ => unreachable!("dispatched operators are exhaustive"),
+    fn arithmetic(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "+" => Ok(Rule::Add(self.variadic(&path, operator, args, 1)?)),
+            "-" => Ok(Rule::Sub(self.bounded(&path, operator, args, 1, 2)?)),
+            "*" => Ok(Rule::Mul(self.variadic(&path, operator, args, 1)?)),
+            "/" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Div(a, b)),
+            "%" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Mod(a, b)),
+            "min" => Ok(Rule::Min(self.variadic(&path, operator, args, 1)?)),
+            "max" => Ok(Rule::Max(self.variadic(&path, operator, args, 1)?)),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
+    }
+
+    fn collection(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "cat" => Ok(Rule::Cat(self.variadic(&path, operator, args, 1)?)),
+            "substr" => Ok(Rule::Substr(self.bounded(&path, operator, args, 2, 3)?)),
+            "in" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::In(a, b)),
+            "merge" => Ok(Rule::Merge(self.variadic(&path, operator, args, 1)?)),
+            "map" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Map(a, b)),
+            "filter" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Filter(a, b)),
+            "reduce" => self
+                .ternary(&path, operator, args)
+                .map(|(a, b, c)| Rule::Reduce(a, b, c)),
+            "all" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::All(a, b)),
+            "none" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::None(a, b)),
+            "some" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::Some(a, b)),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
+    }
+
+    fn custom(&mut self, path: &str, operator: &str, args: &Value) -> Result<Rule, ParseError> {
+        let path = format!("{path}.{operator}");
+        match operator {
+            "starts_with" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::StartsWith(a, b)),
+            "ends_with" => self
+                .binary(&path, operator, args)
+                .map(|(a, b)| Rule::EndsWith(a, b)),
+            "sem_ver" => self.sem_ver(&path, args),
+            "fractional" => self.fractional(&path, args),
+            _ => unreachable!("dispatched operators are exhaustive"),
+        }
+    }
+
+    fn missing_some(&mut self, path: &str, args: &Value) -> Result<Rule, ParseError> {
+        const EXPECTS: &str = "expects a minimum count and an array of keys";
+        let [min, keys] = op_args(args) else {
+            return Err(bad_args(path, "missing_some", EXPECTS));
+        };
+        let Some(min) = min.as_u64() else {
+            return Err(bad_args(path, "missing_some", EXPECTS));
+        };
+        let Value::Array(keys) = keys else {
+            return Err(bad_args(path, "missing_some", EXPECTS));
+        };
+        Ok(Rule::MissingSome {
+            min,
+            keys: self.rules(&format!("{path}[1]"), keys)?,
+        })
+    }
+
+    fn sem_ver(&mut self, path: &str, args: &Value) -> Result<Rule, ParseError> {
+        let [value, operator, version] = op_args(args) else {
+            return Err(bad_args(
+                path,
+                "sem_ver",
+                "expects a value, a comparison operator and a version",
+            ));
+        };
+        let op = match operator {
+            Value::String(symbol) => match symbol.as_str() {
+                "=" => SemVerOp::Eq,
+                "!=" => SemVerOp::Neq,
+                "<" => SemVerOp::Lt,
+                "<=" => SemVerOp::Lte,
+                ">" => SemVerOp::Gt,
+                ">=" => SemVerOp::Gte,
+                "^" => SemVerOp::CaretMatch,
+                "~" => SemVerOp::TildeMatch,
+                _ => {
+                    return Err(bad_args(
+                        path,
+                        "sem_ver",
+                        "the comparison operator must be one of =, !=, <, <=, >, >=, ^ or ~",
+                    ));
+                }
+            },
+            _ => {
+                return Err(bad_args(
+                    path,
+                    "sem_ver",
+                    "the comparison operator must be a string",
+                ));
+            }
+        };
+        Ok(Rule::SemVer {
+            value: Box::new(self.rule(&format!("{path}[0]"), value)?),
+            op,
+            version: Box::new(self.rule(&format!("{path}[2]"), version)?),
+        })
+    }
+
+    fn fractional(&mut self, path: &str, args: &Value) -> Result<Rule, ParseError> {
+        let Value::Array(items) = args else {
+            return Err(bad_args(path, "fractional", "expects an array"));
+        };
+        let (bucket_by, bucket_items) = match items.split_first() {
+            None => {
+                return Err(bad_args(path, "fractional", "expects at least one bucket"));
+            }
+            Some((Value::Array(_), _)) => (None, items.as_slice()),
+            Some((expression, rest)) => (
+                Some(Box::new(self.rule(&format!("{path}[0]"), expression)?)),
+                rest,
+            ),
+        };
+        if bucket_items.is_empty() {
+            return Err(bad_args(path, "fractional", "expects at least one bucket"));
+        }
+
+        let mut buckets = Vec::with_capacity(bucket_items.len());
+        for (index, item) in bucket_items.iter().enumerate() {
+            buckets.push(bucket(&format!("{path}[{index}]"), item)?);
+        }
+        Ok(Rule::Fractional { bucket_by, buckets })
+    }
+
+    fn unary(&mut self, path: &str, operator: &str, args: &Value) -> Result<Box<Rule>, ParseError> {
+        let [argument] = op_args(args) else {
+            return Err(bad_args(path, operator, "expects exactly one argument"));
+        };
+        Ok(Box::new(self.rule(&format!("{path}[0]"), argument)?))
+    }
+
+    fn binary(&mut self, path: &str, operator: &str, args: &Value) -> Result<RulePair, ParseError> {
+        let [first, second] = op_args(args) else {
+            return Err(bad_args(path, operator, "expects exactly two arguments"));
+        };
+        Ok((
+            Box::new(self.rule(&format!("{path}[0]"), first)?),
+            Box::new(self.rule(&format!("{path}[1]"), second)?),
+        ))
+    }
+
+    fn ternary(
+        &mut self,
+        path: &str,
+        operator: &str,
+        args: &Value,
+    ) -> Result<RuleTriple, ParseError> {
+        let [first, second, third] = op_args(args) else {
+            return Err(bad_args(path, operator, "expects exactly three arguments"));
+        };
+        Ok((
+            Box::new(self.rule(&format!("{path}[0]"), first)?),
+            Box::new(self.rule(&format!("{path}[1]"), second)?),
+            Box::new(self.rule(&format!("{path}[2]"), third)?),
+        ))
+    }
+
+    fn variadic(
+        &mut self,
+        path: &str,
+        operator: &str,
+        args: &Value,
+        min: usize,
+    ) -> Result<Vec<Rule>, ParseError> {
+        let items = op_args(args);
+        if items.len() < min {
+            return Err(bad_args(
+                path,
+                operator,
+                &format!("expects at least {min} argument(s)"),
+            ));
+        }
+        self.rules(path, items)
+    }
+
+    fn bounded(
+        &mut self,
+        path: &str,
+        operator: &str,
+        args: &Value,
+        min: usize,
+        max: usize,
+    ) -> Result<Vec<Rule>, ParseError> {
+        let items = op_args(args);
+        if items.len() < min || items.len() > max {
+            return Err(bad_args(
+                path,
+                operator,
+                &format!("expects between {min} and {max} arguments"),
+            ));
+        }
+        self.rules(path, items)
     }
 }
 
@@ -333,89 +590,6 @@ fn var(path: &str, args: &Value) -> Result<Rule, ParseError> {
         },
         _ => Err(bad_args(path, "var", EXPECTS)),
     }
-}
-
-fn missing_some(path: &str, args: &Value) -> Result<Rule, ParseError> {
-    const EXPECTS: &str = "expects a minimum count and an array of keys";
-    let [min, keys] = op_args(args) else {
-        return Err(bad_args(path, "missing_some", EXPECTS));
-    };
-    let Some(min) = min.as_u64() else {
-        return Err(bad_args(path, "missing_some", EXPECTS));
-    };
-    let Value::Array(keys) = keys else {
-        return Err(bad_args(path, "missing_some", EXPECTS));
-    };
-    Ok(Rule::MissingSome {
-        min,
-        keys: rules(&format!("{path}[1]"), keys)?,
-    })
-}
-
-fn sem_ver(path: &str, args: &Value) -> Result<Rule, ParseError> {
-    let [value, operator, version] = op_args(args) else {
-        return Err(bad_args(
-            path,
-            "sem_ver",
-            "expects a value, a comparison operator and a version",
-        ));
-    };
-    let op = match operator {
-        Value::String(symbol) => match symbol.as_str() {
-            "=" => SemVerOp::Eq,
-            "!=" => SemVerOp::Neq,
-            "<" => SemVerOp::Lt,
-            "<=" => SemVerOp::Lte,
-            ">" => SemVerOp::Gt,
-            ">=" => SemVerOp::Gte,
-            "^" => SemVerOp::CaretMatch,
-            "~" => SemVerOp::TildeMatch,
-            _ => {
-                return Err(bad_args(
-                    path,
-                    "sem_ver",
-                    "the comparison operator must be one of =, !=, <, <=, >, >=, ^ or ~",
-                ));
-            }
-        },
-        _ => {
-            return Err(bad_args(
-                path,
-                "sem_ver",
-                "the comparison operator must be a string",
-            ));
-        }
-    };
-    Ok(Rule::SemVer {
-        value: Box::new(rule(&format!("{path}[0]"), value)?),
-        op,
-        version: Box::new(rule(&format!("{path}[2]"), version)?),
-    })
-}
-
-fn fractional(path: &str, args: &Value) -> Result<Rule, ParseError> {
-    let Value::Array(items) = args else {
-        return Err(bad_args(path, "fractional", "expects an array"));
-    };
-    let (bucket_by, bucket_items) = match items.split_first() {
-        None => {
-            return Err(bad_args(path, "fractional", "expects at least one bucket"));
-        }
-        Some((Value::Array(_), _)) => (None, items.as_slice()),
-        Some((expression, rest)) => (
-            Some(Box::new(rule(&format!("{path}[0]"), expression)?)),
-            rest,
-        ),
-    };
-    if bucket_items.is_empty() {
-        return Err(bad_args(path, "fractional", "expects at least one bucket"));
-    }
-
-    let mut buckets = Vec::with_capacity(bucket_items.len());
-    for (index, item) in bucket_items.iter().enumerate() {
-        buckets.push(bucket(&format!("{path}[{index}]"), item)?);
-    }
-    Ok(Rule::Fractional { bucket_by, buckets })
 }
 
 fn bucket(path: &str, value: &Value) -> Result<Bucket, ParseError> {
@@ -460,64 +634,6 @@ fn op_args(value: &Value) -> &[Value] {
         Value::Array(items) => items,
         single => std::slice::from_ref(single),
     }
-}
-
-fn unary(path: &str, operator: &str, args: &Value) -> Result<Box<Rule>, ParseError> {
-    let [argument] = op_args(args) else {
-        return Err(bad_args(path, operator, "expects exactly one argument"));
-    };
-    Ok(Box::new(rule(&format!("{path}[0]"), argument)?))
-}
-
-fn binary(path: &str, operator: &str, args: &Value) -> Result<RulePair, ParseError> {
-    let [first, second] = op_args(args) else {
-        return Err(bad_args(path, operator, "expects exactly two arguments"));
-    };
-    Ok((
-        Box::new(rule(&format!("{path}[0]"), first)?),
-        Box::new(rule(&format!("{path}[1]"), second)?),
-    ))
-}
-
-fn ternary(path: &str, operator: &str, args: &Value) -> Result<RuleTriple, ParseError> {
-    let [first, second, third] = op_args(args) else {
-        return Err(bad_args(path, operator, "expects exactly three arguments"));
-    };
-    Ok((
-        Box::new(rule(&format!("{path}[0]"), first)?),
-        Box::new(rule(&format!("{path}[1]"), second)?),
-        Box::new(rule(&format!("{path}[2]"), third)?),
-    ))
-}
-
-fn variadic(path: &str, operator: &str, args: &Value, min: usize) -> Result<Vec<Rule>, ParseError> {
-    let items = op_args(args);
-    if items.len() < min {
-        return Err(bad_args(
-            path,
-            operator,
-            &format!("expects at least {min} argument(s)"),
-        ));
-    }
-    rules(path, items)
-}
-
-fn bounded(
-    path: &str,
-    operator: &str,
-    args: &Value,
-    min: usize,
-    max: usize,
-) -> Result<Vec<Rule>, ParseError> {
-    let items = op_args(args);
-    if items.len() < min || items.len() > max {
-        return Err(bad_args(
-            path,
-            operator,
-            &format!("expects between {min} and {max} arguments"),
-        ));
-    }
-    rules(path, items)
 }
 
 fn bad_args(path: &str, operator: &str, reason: &str) -> ParseError {
