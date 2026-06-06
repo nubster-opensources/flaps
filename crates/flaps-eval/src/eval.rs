@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{FlagSet, Metadata};
+use serde_json::{Value, json};
+
+use crate::model::{FlagSet, Metadata, State, Variants};
 
 /// The context a targeting rule evaluates against.
 ///
@@ -114,7 +116,67 @@ impl FlagSet {
         flag_key: &str,
         context: &EvaluationContext,
     ) -> Result<Resolution, EvaluationError> {
-        let _ = (flag_key, context);
-        todo!()
+        let flag = self
+            .flags
+            .get(flag_key)
+            .ok_or_else(|| EvaluationError::FlagNotFound {
+                flag_key: flag_key.to_owned(),
+            })?;
+        match flag.state {
+            State::Disabled => todo!(),
+            State::Enabled => {}
+        }
+        let Some(targeting) = &flag.targeting else {
+            todo!()
+        };
+        let scope = evaluation_scope(flag_key, context);
+        let outcome = crate::logic::apply(targeting, &scope)?;
+        let (variant, reason) = match outcome {
+            Value::Bool(boolean) => (boolean.to_string(), Reason::TargetingMatch),
+            Value::Null => match &flag.default_variant {
+                Some(default) => (default.clone(), Reason::Default),
+                None => todo!(),
+            },
+            _ => todo!(),
+        };
+        let Some(value) = variant_value(&flag.variants, &variant) else {
+            todo!()
+        };
+        Ok(Resolution {
+            value: Some(value),
+            variant: Some(variant),
+            reason,
+            metadata: Metadata::new(),
+        })
+    }
+}
+
+/// Builds the data scope rules evaluate against: the context attributes,
+/// the targeting key under `targetingKey`, and the reserved `$flagd`
+/// object carrying the flag key and the timestamp.
+fn evaluation_scope(flag_key: &str, context: &EvaluationContext) -> Value {
+    let mut scope = serde_json::Map::new();
+    for (key, value) in &context.attributes {
+        scope.insert(key.clone(), value.clone());
+    }
+    if let Some(targeting_key) = &context.targeting_key {
+        scope.insert("targetingKey".to_owned(), targeting_key.clone().into());
+    }
+    scope.insert(
+        "$flagd".to_owned(),
+        json!({ "flagKey": flag_key, "timestamp": context.timestamp }),
+    );
+    Value::Object(scope)
+}
+
+/// Looks a variant key up and converts its value to JSON.
+fn variant_value(variants: &Variants, name: &str) -> Option<Value> {
+    match variants {
+        Variants::Boolean(map) => map.get(name).map(|value| Value::Bool(*value)),
+        Variants::String(map) => map.get(name).map(|value| Value::String(value.clone())),
+        Variants::Number(map) => map
+            .get(name)
+            .map(|value| serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number)),
+        Variants::Object(map) => map.get(name).map(|value| Value::Object(value.clone())),
     }
 }
