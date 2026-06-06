@@ -19,11 +19,14 @@
 //! its own code default.
 
 mod error;
+mod eval;
+mod logic;
 mod model;
 mod parse;
 mod serialize;
 mod targeting;
 
 pub use error::ParseError;
+pub use eval::{EvaluationContext, EvaluationError, Reason, Resolution};
 pub use model::{Flag, FlagSet, Metadata, MetadataValue, State, Variants};
 pub use targeting::{Bucket, Literal, Rule, SemVerOp};
