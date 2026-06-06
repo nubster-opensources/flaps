@@ -122,31 +122,52 @@ impl FlagSet {
             .ok_or_else(|| EvaluationError::FlagNotFound {
                 flag_key: flag_key.to_owned(),
             })?;
-        match flag.state {
-            State::Disabled => todo!(),
-            State::Enabled => {}
+        let mut metadata = self.metadata.clone();
+        metadata.extend(flag.metadata.clone());
+        if flag.state == State::Disabled {
+            return Ok(Resolution {
+                value: None,
+                variant: None,
+                reason: Reason::Disabled,
+                metadata,
+            });
         }
-        let Some(targeting) = &flag.targeting else {
-            todo!()
+        let (variant, reason) = match &flag.targeting {
+            None => (flag.default_variant.clone(), Reason::Static),
+            Some(targeting) => {
+                let scope = evaluation_scope(flag_key, context);
+                match crate::logic::apply(targeting, &scope)? {
+                    Value::String(name) => (Some(name), Reason::TargetingMatch),
+                    Value::Bool(boolean) => (Some(boolean.to_string()), Reason::TargetingMatch),
+                    Value::Null => (flag.default_variant.clone(), Reason::Default),
+                    other => {
+                        return Err(EvaluationError::InvalidVariant {
+                            flag_key: flag_key.to_owned(),
+                            resolved: other,
+                        });
+                    }
+                }
+            }
         };
-        let scope = evaluation_scope(flag_key, context);
-        let outcome = crate::logic::apply(targeting, &scope)?;
-        let (variant, reason) = match outcome {
-            Value::Bool(boolean) => (boolean.to_string(), Reason::TargetingMatch),
-            Value::Null => match &flag.default_variant {
-                Some(default) => (default.clone(), Reason::Default),
-                None => todo!(),
-            },
-            _ => todo!(),
+        let Some(variant) = variant else {
+            return Ok(Resolution {
+                value: None,
+                variant: None,
+                reason,
+                metadata,
+            });
         };
         let Some(value) = variant_value(&flag.variants, &variant) else {
-            todo!()
+            return Err(EvaluationError::InvalidVariant {
+                flag_key: flag_key.to_owned(),
+                resolved: Value::String(variant),
+            });
         };
         Ok(Resolution {
             value: Some(value),
             variant: Some(variant),
             reason,
-            metadata: Metadata::new(),
+            metadata,
         })
     }
 }
