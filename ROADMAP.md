@@ -2,11 +2,11 @@
 
 This document tracks the milestones of the repository issue tracker.
 
-## M0: Foundations (current)
+## M0: Foundations (delivered)
 
 Public repository, Cargo workspace with seven crates plus xtask, CI (fmt, clippy, tests, supply chain, MSRV), dual MIT OR Apache-2.0 licensing, public documentation set.
 
-## v0.1.0: Headless MVP
+## v0.1.0: Headless MVP (current)
 
 Everything needed to manage and evaluate flags through the API, with no UI:
 
@@ -20,6 +20,23 @@ Everything needed to manage and evaluate flags through the API, with no UI:
 
 Embedded server-rendered admin UI (deactivatable by configuration), generic OIDC discovery for human sign-in, feedback from first production usage.
 
-## Later
+## v0.3.0: Ecosystem and Integration
 
-Stale flag detection built on flag types, flag scheduling, outbound events, flags-as-code reconciliation.
+Connect flaps to the wider system without lock-in:
+
+- Outbound change events as CloudEvents and webhooks.
+- Flags-as-code: declarative flag definitions with GitOps reconciliation.
+- Additional language SDKs over OFREP.
+
+## v0.4.0: Lifecycle and Operability
+
+Manage flags over time:
+
+- Scheduled activation and expiration.
+- Stale flag detection built on flag types.
+- Change history and insights.
+- Change approvals.
+
+## Backlog
+
+Beyond v0.4: fine grained RBAC, A/B testing and experimentation metrics.
