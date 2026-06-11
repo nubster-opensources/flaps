@@ -20,10 +20,13 @@
 
 mod error;
 mod eval;
+mod fractional;
 mod logic;
 mod model;
 mod parse;
+mod semver;
 mod serialize;
+mod string_comparison;
 mod targeting;
 
 pub use error::ParseError;
