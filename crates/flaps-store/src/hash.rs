@@ -26,6 +26,9 @@ impl KeyHasher {
     /// Returns the lowercase hex HMAC-SHA256 of `raw_key` under the pepper.
     #[must_use]
     pub fn hash(&self, raw_key: &str) -> String {
+        // infallible: HMAC accepts any key length (the underlying `get_der_key`
+        // pads or hashes the key to fit the block size and never errors).
+        #[allow(clippy::expect_used)]
         let mut mac =
             HmacSha256::new_from_slice(&self.pepper).expect("HMAC accepts any key length");
         mac.update(raw_key.as_bytes());
