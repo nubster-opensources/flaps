@@ -40,6 +40,9 @@ semver = "1.0.28"
 tracing = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "fs", "io-util"] }
 clap = { version = "4", features = ["derive", "env"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros", "json"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

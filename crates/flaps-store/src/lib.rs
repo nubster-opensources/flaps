@@ -1,5 +1,38 @@
-//! Persistence layer for Flaps.
+//! Persistence layer for the Flaps feature flag platform.
 //!
-//! SQLx multi backend storage supporting SQLite and PostgreSQL, embedded
-//! migrations and an append only audit log written in the same transaction
-//! as every mutation. The store lands with the v0.1.0 milestone.
+//! This crate persists the **editable source model** defined by `flaps-domain`:
+//! projects, environments, feature flags, segments, per-environment flag
+//! configurations, and SDK keys.
+//!
+//! # Backends
+//!
+//! Two concrete implementations are provided:
+//!
+//! - [`sqlite::SqliteStore`]: SQLite pool with embedded migrations. Suitable for
+//!   single-node deployments and in-memory testing.
+//! - [`postgres::PostgresStore`]: PostgreSQL pool with embedded migrations.
+//!   Suitable for production multi-instance deployments.
+//!
+//! # Usage
+//!
+//! ```rust,no_run
+//! # async fn example() -> flaps_store::StoreResult<()> {
+//! use flaps_store::{sqlite::SqliteStore, KeyHasher};
+//! use flaps_store::repository::ProjectRepository;
+//!
+//! let store = SqliteStore::in_memory(KeyHasher::new(b"my-pepper")).await?;
+//! let projects = store.list_projects().await?;
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod error;
+pub mod hash;
+pub mod postgres;
+pub mod repository;
+pub mod sdk_key;
+pub mod sqlite;
+
+pub use error::{StoreError, StoreResult};
+pub use hash::KeyHasher;
+pub use sdk_key::{NewSdkKey, SdkKeyRecord, SdkKeyScope};
