@@ -59,4 +59,26 @@ pub enum CompileError {
         /// Underlying parse error message.
         reason: String,
     },
+
+    /// A variant value does not match the declared value type of its flag.
+    ///
+    /// This is a defensive error: the domain constructor normally enforces type
+    /// homogeneity, so this path should not be reachable through valid domain
+    /// objects.
+    #[error("variant `{variant}` in flag `{flag}` does not match the declared value type")]
+    VariantTypeMismatch {
+        /// Key of the flag whose variant has the wrong type.
+        flag: String,
+        /// Key of the variant whose value type is inconsistent.
+        variant: String,
+    },
+
+    /// A variant value cannot be represented as JSON (e.g. `f64::NAN` or `f64::INFINITY`).
+    #[error("variant value in flag `{flag}` cannot be represented: {reason}")]
+    InvalidVariantValue {
+        /// Key of the flag whose variant failed serialization.
+        flag: String,
+        /// Underlying serialization error message.
+        reason: String,
+    },
 }

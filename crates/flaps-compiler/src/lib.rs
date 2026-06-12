@@ -986,6 +986,49 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------
+    // 11. InvalidVariantValue: NaN f64 variant fails serialization gracefully
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn number_variant_nan_returns_invalid_variant_value_error() {
+        // DomainVariants::new accepts NaN because matches_type only checks
+        // Number == Number without inspecting the f64 payload.  The compiler
+        // must therefore handle the serde_json serialization failure gracefully
+        // instead of panicking.
+        let flag = Flag {
+            key: fk("nan-flag"),
+            name: "nan-flag".into(),
+            description: None,
+            flag_type: FlagType::Experiment,
+            value_type: ValueType::Number,
+            variants: DomainVariants::new(
+                ValueType::Number,
+                [(vk("bad"), VariantValue::Number(f64::NAN))],
+            )
+            .unwrap(),
+        };
+        let config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![],
+            default_rule: ServeTarget::Fixed(vk("bad")),
+        };
+        let env = ek("prod");
+        let result = compile_environment(
+            &env,
+            &[FlagConfig {
+                flag: &flag,
+                config: &config,
+            }],
+            &no_segments(),
+            None,
+        );
+        assert!(
+            matches!(result, Err(CompileError::InvalidVariantValue { .. })),
+            "expected InvalidVariantValue for NaN variant, got {result:?}"
+        );
+    }
+
     #[test]
     fn environments_referencing_segment_empty_when_no_reference() {
         let flag = bool_flag("my-flag");

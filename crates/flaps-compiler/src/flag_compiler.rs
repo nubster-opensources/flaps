@@ -47,13 +47,13 @@ fn extract_entries(
     flag: &str,
     domain: &DomainVariants,
 ) -> Result<SerializedVariants, CompileError> {
-    let raw = serde_json::to_value(domain).map_err(|e| CompileError::EvaluatorRejected {
-        environment: String::new(),
-        reason: format!("variant serialization failed for flag `{flag}`: {e}"),
+    let raw = serde_json::to_value(domain).map_err(|e| CompileError::InvalidVariantValue {
+        flag: flag.to_owned(),
+        reason: format!("variant serialization failed: {e}"),
     })?;
-    serde_json::from_value(raw).map_err(|e| CompileError::EvaluatorRejected {
-        environment: String::new(),
-        reason: format!("variant deserialization failed for flag `{flag}`: {e}"),
+    serde_json::from_value(raw).map_err(|e| CompileError::InvalidVariantValue {
+        flag: flag.to_owned(),
+        reason: format!("variant deserialization failed: {e}"),
     })
 }
 
@@ -95,42 +95,59 @@ fn compile_variants(flag: &str, domain: &DomainVariants) -> Result<Variants, Com
 
     match domain.value_type() {
         ValueType::Boolean => {
-            let map = extracted
-                .entries
-                .into_iter()
-                .map(|(k, v)| {
-                    let SerializedVariantValue::Bool(b) = v else {
-                        unreachable!("domain guarantees type homogeneity")
-                    };
-                    (k, b)
-                })
-                .collect();
+            // The domain constructor enforces type homogeneity, so the
+            // VariantTypeMismatch branch is defensive and not reachable
+            // through valid domain objects.
+            let mut map = BTreeMap::new();
+            for (k, v) in extracted.entries {
+                match v {
+                    SerializedVariantValue::Bool(b) => {
+                        map.insert(k, b);
+                    }
+                    _ => {
+                        return Err(CompileError::VariantTypeMismatch {
+                            flag: flag.to_owned(),
+                            variant: k,
+                        });
+                    }
+                }
+            }
             Ok(Variants::Boolean(map))
         }
         ValueType::String => {
-            let map = extracted
-                .entries
-                .into_iter()
-                .map(|(k, v)| {
-                    let SerializedVariantValue::String(s) = v else {
-                        unreachable!("domain guarantees type homogeneity")
-                    };
-                    (k, s)
-                })
-                .collect();
+            // Same defensive invariant as the Boolean arm above.
+            let mut map = BTreeMap::new();
+            for (k, v) in extracted.entries {
+                match v {
+                    SerializedVariantValue::String(s) => {
+                        map.insert(k, s);
+                    }
+                    _ => {
+                        return Err(CompileError::VariantTypeMismatch {
+                            flag: flag.to_owned(),
+                            variant: k,
+                        });
+                    }
+                }
+            }
             Ok(Variants::String(map))
         }
         ValueType::Number => {
-            let map = extracted
-                .entries
-                .into_iter()
-                .map(|(k, v)| {
-                    let SerializedVariantValue::Number(n) = v else {
-                        unreachable!("domain guarantees type homogeneity")
-                    };
-                    (k, n)
-                })
-                .collect();
+            // Same defensive invariant as the Boolean arm above.
+            let mut map = BTreeMap::new();
+            for (k, v) in extracted.entries {
+                match v {
+                    SerializedVariantValue::Number(n) => {
+                        map.insert(k, n);
+                    }
+                    _ => {
+                        return Err(CompileError::VariantTypeMismatch {
+                            flag: flag.to_owned(),
+                            variant: k,
+                        });
+                    }
+                }
+            }
             Ok(Variants::Number(map))
         }
         ValueType::Object => {
