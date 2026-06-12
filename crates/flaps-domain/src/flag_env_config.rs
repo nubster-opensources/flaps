@@ -16,6 +16,41 @@ pub struct WeightedVariant {
     pub weight: u32,
 }
 
+/// A validated rollout weight list.
+///
+/// The inner `Vec<WeightedVariant>` is private to enforce the invariant that
+/// the total weight is strictly positive. Construct via [`TryFrom`] or through
+/// [`ServeTarget::rollout`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<WeightedVariant>", into = "Vec<WeightedVariant>")]
+pub struct Rollout(Vec<WeightedVariant>);
+
+impl Rollout {
+    /// Returns the weighted variants in this rollout.
+    #[must_use]
+    pub fn weights(&self) -> &[WeightedVariant] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<WeightedVariant>> for Rollout {
+    type Error = DomainError;
+
+    fn try_from(weights: Vec<WeightedVariant>) -> Result<Self, DomainError> {
+        let total: u64 = weights.iter().map(|w| u64::from(w.weight)).sum();
+        if total == 0 {
+            return Err(DomainError::InvalidRollout);
+        }
+        Ok(Self(weights))
+    }
+}
+
+impl From<Rollout> for Vec<WeightedVariant> {
+    fn from(r: Rollout) -> Vec<WeightedVariant> {
+        r.0
+    }
+}
+
 /// Determines which variant to serve when a rule matches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,7 +60,7 @@ pub enum ServeTarget {
     /// Distribute traffic across variants according to weights.
     ///
     /// Use [`ServeTarget::rollout`] to construct a validated rollout.
-    Rollout(Vec<WeightedVariant>),
+    Rollout(Rollout),
 }
 
 impl ServeTarget {
@@ -34,11 +69,7 @@ impl ServeTarget {
     /// # Errors
     /// Returns [`DomainError::InvalidRollout`] when the sum of weights is zero.
     pub fn rollout(weights: Vec<WeightedVariant>) -> Result<Self, DomainError> {
-        let total: u64 = weights.iter().map(|w| u64::from(w.weight)).sum();
-        if total == 0 {
-            return Err(DomainError::InvalidRollout);
-        }
-        Ok(Self::Rollout(weights))
+        Rollout::try_from(weights).map(Self::Rollout)
     }
 }
 
@@ -125,6 +156,20 @@ mod tests {
     }
 
     #[test]
+    fn rollout_weights_accessor() {
+        let weights = vec![WeightedVariant {
+            variant: vk("on"),
+            weight: 50,
+        }];
+        let target = ServeTarget::rollout(weights.clone()).unwrap();
+        if let ServeTarget::Rollout(rollout) = target {
+            assert_eq!(rollout.weights(), weights.as_slice());
+        } else {
+            panic!("expected Rollout variant");
+        }
+    }
+
+    #[test]
     fn flag_env_config_serde_round_trip() {
         let config = FlagEnvConfig {
             enabled: true,
@@ -159,5 +204,34 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         assert!(json.contains("default_rule"));
+    }
+
+    #[test]
+    fn deserialize_rollout_with_all_zero_weights_is_rejected() {
+        // A rollout JSON where all weights are zero must be rejected at deserialization
+        let json = r#"{"rollout":[{"variant":"on","weight":0},{"variant":"off","weight":0}]}"#;
+        let result: Result<ServeTarget, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "deserialization must reject rollout with zero total weight"
+        );
+    }
+
+    #[test]
+    fn deserialize_rollout_valid_round_trip() {
+        let target = ServeTarget::rollout(vec![
+            WeightedVariant {
+                variant: vk("on"),
+                weight: 60,
+            },
+            WeightedVariant {
+                variant: vk("off"),
+                weight: 40,
+            },
+        ])
+        .unwrap();
+        let json = serde_json::to_string(&target).unwrap();
+        let back: ServeTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, target);
     }
 }

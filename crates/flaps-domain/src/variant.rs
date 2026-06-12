@@ -50,14 +50,46 @@ impl VariantValue {
     }
 }
 
+/// Private deserialization helper for [`Variants`].
+///
+/// Mirrors the serialized shape of [`Variants`] so that `TryFrom` can
+/// route raw JSON through the validating constructor.
+#[derive(Deserialize)]
+struct VariantsRepr {
+    value_type: ValueType,
+    entries: HashMap<VariantKey, VariantValue>,
+}
+
 /// The validated set of variants declared globally on a flag.
 ///
 /// All entries must carry values whose type matches the flag's [`ValueType`].
 /// The set is immutable once constructed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Deserialization is routed through [`Variants::new`] so that invariants
+/// (non-empty, type-homogeneous) are enforced even when deserializing from JSON.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(try_from = "VariantsRepr")]
 pub struct Variants {
     value_type: ValueType,
     entries: HashMap<VariantKey, VariantValue>,
+}
+
+impl<'de> serde::Deserialize<'de> for Variants {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = VariantsRepr::deserialize(deserializer)?;
+        Variants::try_from(repr).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<VariantsRepr> for Variants {
+    type Error = DomainError;
+
+    fn try_from(r: VariantsRepr) -> Result<Self, DomainError> {
+        Variants::new(r.value_type, r.entries)
+    }
 }
 
 impl Variants {
@@ -183,5 +215,35 @@ mod tests {
             [(vk("cfg"), VariantValue::Json(serde_json::json!({"k": 1})))],
         );
         assert!(v.is_ok());
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_variants() {
+        let json = r#"{"value_type":"boolean","entries":{}}"#;
+        let result: Result<Variants, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "deserialization must reject empty variant set"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_type_mismatch() {
+        // entries contains a string value but value_type is boolean
+        let json = r#"{"value_type":"boolean","entries":{"on":{"string":"hello"}}}"#;
+        let result: Result<Variants, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "deserialization must reject type-mismatched variant values"
+        );
+    }
+
+    #[test]
+    fn deserialize_valid_variants_round_trip() {
+        let variants =
+            Variants::new(ValueType::Boolean, [(vk("on"), VariantValue::Bool(true))]).unwrap();
+        let json = serde_json::to_string(&variants).unwrap();
+        let back: Variants = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, variants);
     }
 }

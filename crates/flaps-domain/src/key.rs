@@ -45,7 +45,7 @@ macro_rules! define_key {
     ($(#[$attr:meta])* $name:ident) => {
         $(#[$attr])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
+        #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -69,6 +69,20 @@ macro_rules! define_key {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(k: $name) -> String {
+                k.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = DomainError;
+
+            fn try_from(s: String) -> Result<Self, DomainError> {
+                Self::new(s)
             }
         }
     };
@@ -169,5 +183,41 @@ mod tests {
         assert!(EnvironmentKey::new("prod").is_ok());
         assert!(SegmentKey::new("beta-users").is_ok());
         assert!(VariantKey::new("enabled").is_ok());
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_key_with_space() {
+        let result: Result<FlagKey, _> = serde_json::from_str(r#""BAD KEY""#);
+        assert!(
+            result.is_err(),
+            "deserialization must reject keys with spaces"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_key_with_underscore() {
+        let result: Result<FlagKey, _> = serde_json::from_str(r#""bad_key""#);
+        assert!(
+            result.is_err(),
+            "deserialization must reject keys with underscores"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_key_with_uppercase() {
+        let result: Result<FlagKey, _> = serde_json::from_str(r#""BadKey""#);
+        assert!(
+            result.is_err(),
+            "deserialization must reject keys with uppercase"
+        );
+    }
+
+    #[test]
+    fn deserialize_accepts_valid_key_round_trip() {
+        let key = FlagKey::new("my-flag").unwrap();
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(json, r#""my-flag""#);
+        let back: FlagKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, key);
     }
 }
