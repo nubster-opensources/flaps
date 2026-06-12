@@ -33,8 +33,11 @@ async fn sdk_key_is_hashed_at_rest() {
 
     let proj = shared::make_project("hash-proj");
     let env = shared::make_env("production");
-    store.upsert_project(&proj).await.unwrap();
-    store.upsert_environment(&proj.key, &env).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
 
     let raw_key = "secret-server-sdk-key-12345";
     let new_key = NewSdkKey {

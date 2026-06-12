@@ -8,7 +8,15 @@ use crate::error::StoreResult;
 #[allow(async_fn_in_trait)]
 pub trait EnvironmentRepository {
     /// Inserts or fully replaces the environment within `project`.
-    async fn upsert_environment(&self, project: &ProjectKey, env: &Environment) -> StoreResult<()>;
+    ///
+    /// `actor` identifies the principal performing the mutation; it is recorded
+    /// in the audit log.
+    async fn upsert_environment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        env: &Environment,
+    ) -> StoreResult<()>;
 
     /// Returns the environment for `key` within `project`, or `None`.
     async fn get_environment(
@@ -21,8 +29,13 @@ pub trait EnvironmentRepository {
     async fn list_environments(&self, project: &ProjectKey) -> StoreResult<Vec<Environment>>;
 
     /// Deletes the environment identified by `project` + `key`.
+    ///
+    /// `actor` identifies the principal performing the mutation; it is recorded
+    /// in the audit log. If the environment does not exist this is a no-op and
+    /// no audit entry is written.
     async fn delete_environment(
         &self,
+        actor: &str,
         project: &ProjectKey,
         key: &EnvironmentKey,
     ) -> StoreResult<()>;

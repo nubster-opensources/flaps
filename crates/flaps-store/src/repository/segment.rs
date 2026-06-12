@@ -8,7 +8,15 @@ use crate::error::StoreResult;
 #[allow(async_fn_in_trait)]
 pub trait SegmentRepository {
     /// Inserts or fully replaces the segment within `project`.
-    async fn upsert_segment(&self, project: &ProjectKey, segment: &Segment) -> StoreResult<()>;
+    ///
+    /// `actor` identifies the principal performing the mutation; it is recorded
+    /// in the audit log.
+    async fn upsert_segment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        segment: &Segment,
+    ) -> StoreResult<()>;
 
     /// Returns the segment for `key` within `project`, or `None`.
     async fn get_segment(
@@ -21,5 +29,14 @@ pub trait SegmentRepository {
     async fn list_segments(&self, project: &ProjectKey) -> StoreResult<Vec<Segment>>;
 
     /// Deletes the segment identified by `project` + `key`.
-    async fn delete_segment(&self, project: &ProjectKey, key: &SegmentKey) -> StoreResult<()>;
+    ///
+    /// `actor` identifies the principal performing the mutation; it is recorded
+    /// in the audit log. If the segment does not exist this is a no-op and no
+    /// audit entry is written.
+    async fn delete_segment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        key: &SegmentKey,
+    ) -> StoreResult<()>;
 }

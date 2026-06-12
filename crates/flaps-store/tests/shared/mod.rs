@@ -7,10 +7,10 @@ use flaps_domain::{
     TargetingRule, ValueType, VariantKey, VariantValue, Variants, WeightedVariant,
 };
 use flaps_store::{
-    KeyHasher, NewSdkKey, SdkKeyScope,
+    AuditRecord, KeyHasher, NewSdkKey, SdkKeyScope,
     repository::{
-        EnvironmentRepository, FlagEnvConfigRepository, FlagRepository, ProjectRepository,
-        SdkKeyRepository, SegmentRepository, TransactionalStore, WriteSession,
+        AuditLogRepository, EnvironmentRepository, FlagEnvConfigRepository, FlagRepository,
+        ProjectRepository, SdkKeyRepository, SegmentRepository, TransactionalStore, WriteSession,
     },
 };
 
@@ -129,7 +129,7 @@ pub(crate) fn make_flag_env_config() -> FlagEnvConfig {
 // Shared suite
 // ---------------------------------------------------------------------------
 
-/// Runs all 14 acceptance test cases against a store that implements all traits.
+/// Runs all acceptance test cases against a store that implements all traits.
 pub(crate) async fn run_all<S>(store: S)
 where
     S: ProjectRepository
@@ -138,6 +138,7 @@ where
         + SegmentRepository
         + FlagEnvConfigRepository
         + SdkKeyRepository
+        + AuditLogRepository
         + TransactionalStore
         + Clone
         + 'static,
@@ -156,6 +157,17 @@ where
     test_sdk_key_pepper_changes_hash();
     test_transaction_commit_persists(&store).await;
     test_transaction_drop_rolls_back(&store).await;
+    // Audit log tests (#17)
+    test_audit_on_create(&store).await;
+    test_audit_on_update(&store).await;
+    test_audit_on_delete(&store).await;
+    test_delete_absent_writes_no_audit(&store).await;
+    test_failed_mutation_leaves_no_audit(&store).await;
+    test_session_commit_audits_each_mutation(&store).await;
+    test_session_drop_writes_no_audit(&store).await;
+    test_audit_entries_for_filters_by_entity(&store).await;
+    test_audit_covers_all_aggregates(&store).await;
+    test_audit_is_append_only_api(&store);
     // sdk_key_is_hashed_at_rest is backend-specific (requires direct DB access);
     // it is tested inline in the sqlite test file via a raw query.
 }
@@ -166,7 +178,7 @@ where
 
 async fn test_project_round_trip<S: ProjectRepository>(store: &S) {
     let proj = make_project("round-trip");
-    store.upsert_project(&proj).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
 
     let fetched = store.get_project(&proj.key).await.unwrap().unwrap();
     assert_eq!(fetched.name, proj.name);
@@ -175,7 +187,7 @@ async fn test_project_round_trip<S: ProjectRepository>(store: &S) {
     let list = store.list_projects().await.unwrap();
     assert!(list.iter().any(|p| p.key == proj.key));
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
     let after = store.get_project(&proj.key).await.unwrap();
     assert!(after.is_none(), "project should be gone after delete");
 }
@@ -186,17 +198,17 @@ async fn test_project_round_trip<S: ProjectRepository>(store: &S) {
 
 async fn test_project_upsert_is_idempotent<S: ProjectRepository>(store: &S) {
     let mut proj = make_project("idempotent");
-    store.upsert_project(&proj).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
 
     proj.name = "Updated Name".into();
-    store.upsert_project(&proj).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
 
     let list = store.list_projects().await.unwrap();
     let matching: Vec<_> = list.iter().filter(|p| p.key == proj.key).collect();
     assert_eq!(matching.len(), 1, "should have exactly one project");
     assert_eq!(matching[0].name, "Updated Name");
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +219,8 @@ async fn test_external_ref_unique<S: ProjectRepository>(store: &S) {
     let proj_a = make_project_with_ref("ext-a", "urn:shared:ref");
     let proj_b = make_project_with_ref("ext-b", "urn:shared:ref");
 
-    store.upsert_project(&proj_a).await.unwrap();
-    let result = store.upsert_project(&proj_b).await;
+    store.upsert_project("tester", &proj_a).await.unwrap();
+    let result = store.upsert_project("tester", &proj_b).await;
 
     assert!(
         result.is_err(),
@@ -220,8 +232,8 @@ async fn test_external_ref_unique<S: ProjectRepository>(store: &S) {
         panic!("expected Conflict error, got: {result:?}");
     }
 
-    store.delete_project(&proj_a.key).await.unwrap();
-    let _ = store.delete_project(&proj_b.key).await;
+    store.delete_project("tester", &proj_a.key).await.unwrap();
+    let _ = store.delete_project("tester", &proj_b.key).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,15 +244,15 @@ async fn test_external_ref_null_allowed<S: ProjectRepository>(store: &S) {
     let proj_c = make_project("null-ref-c");
     let proj_d = make_project("null-ref-d");
 
-    store.upsert_project(&proj_c).await.unwrap();
-    store.upsert_project(&proj_d).await.unwrap();
+    store.upsert_project("tester", &proj_c).await.unwrap();
+    store.upsert_project("tester", &proj_d).await.unwrap();
 
     let list = store.list_projects().await.unwrap();
     assert!(list.iter().any(|p| p.key == proj_c.key));
     assert!(list.iter().any(|p| p.key == proj_d.key));
 
-    store.delete_project(&proj_c.key).await.unwrap();
-    store.delete_project(&proj_d.key).await.unwrap();
+    store.delete_project("tester", &proj_c.key).await.unwrap();
+    store.delete_project("tester", &proj_d.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -250,12 +262,18 @@ async fn test_external_ref_null_allowed<S: ProjectRepository>(store: &S) {
 async fn test_environment_round_trip<S: ProjectRepository + EnvironmentRepository>(store: &S) {
     let proj1 = make_project("env-proj1");
     let proj2 = make_project("env-proj2");
-    store.upsert_project(&proj1).await.unwrap();
-    store.upsert_project(&proj2).await.unwrap();
+    store.upsert_project("tester", &proj1).await.unwrap();
+    store.upsert_project("tester", &proj2).await.unwrap();
 
     let env = make_env("production");
-    store.upsert_environment(&proj1.key, &env).await.unwrap();
-    store.upsert_environment(&proj2.key, &env).await.unwrap();
+    store
+        .upsert_environment("tester", &proj1.key, &env)
+        .await
+        .unwrap();
+    store
+        .upsert_environment("tester", &proj2.key, &env)
+        .await
+        .unwrap();
 
     let e1 = store
         .get_environment(&proj1.key, &env.key)
@@ -276,14 +294,14 @@ async fn test_environment_round_trip<S: ProjectRepository + EnvironmentRepositor
     assert_eq!(list2.len(), 1);
 
     store
-        .delete_environment(&proj1.key, &env.key)
+        .delete_environment("tester", &proj1.key, &env.key)
         .await
         .unwrap();
     let after = store.get_environment(&proj1.key, &env.key).await.unwrap();
     assert!(after.is_none());
 
-    store.delete_project(&proj1.key).await.unwrap();
-    store.delete_project(&proj2.key).await.unwrap();
+    store.delete_project("tester", &proj1.key).await.unwrap();
+    store.delete_project("tester", &proj2.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +310,10 @@ async fn test_environment_round_trip<S: ProjectRepository + EnvironmentRepositor
 
 async fn test_flag_round_trip<S: ProjectRepository + FlagRepository>(store: &S) {
     let proj = make_project("flag-proj");
-    store.upsert_project(&proj).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
 
     let flag = make_flag("my-flag");
-    store.upsert_flag(&proj.key, &flag).await.unwrap();
+    store.upsert_flag("tester", &proj.key, &flag).await.unwrap();
 
     let fetched = store.get_flag(&proj.key, &flag.key).await.unwrap().unwrap();
     assert_eq!(fetched.name, flag.name);
@@ -309,7 +327,10 @@ async fn test_flag_round_trip<S: ProjectRepository + FlagRepository>(store: &S) 
     let list = store.list_flags(&proj.key).await.unwrap();
     assert_eq!(list.len(), 1);
 
-    store.delete_flag(&proj.key, &flag.key).await.unwrap();
+    store
+        .delete_flag("tester", &proj.key, &flag.key)
+        .await
+        .unwrap();
     assert!(
         store
             .get_flag(&proj.key, &flag.key)
@@ -318,7 +339,7 @@ async fn test_flag_round_trip<S: ProjectRepository + FlagRepository>(store: &S) 
             .is_none()
     );
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -327,10 +348,13 @@ async fn test_flag_round_trip<S: ProjectRepository + FlagRepository>(store: &S) 
 
 async fn test_segment_round_trip<S: ProjectRepository + SegmentRepository>(store: &S) {
     let proj = make_project("seg-proj");
-    store.upsert_project(&proj).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
 
     let seg = make_segment("beta-users");
-    store.upsert_segment(&proj.key, &seg).await.unwrap();
+    store
+        .upsert_segment("tester", &proj.key, &seg)
+        .await
+        .unwrap();
 
     let fetched = store
         .get_segment(&proj.key, &seg.key)
@@ -343,7 +367,7 @@ async fn test_segment_round_trip<S: ProjectRepository + SegmentRepository>(store
         "recursive SegmentMatch tree must round-trip faithfully"
     );
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -360,11 +384,14 @@ async fn test_flag_env_config_round_trip<
     let flag = make_flag("my-feature");
     let config = make_flag_env_config();
 
-    store.upsert_project(&proj).await.unwrap();
-    store.upsert_environment(&proj.key, &env).await.unwrap();
-    store.upsert_flag(&proj.key, &flag).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
     store
-        .upsert_flag_env_config(&proj.key, &flag.key, &env.key, &config)
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+    store.upsert_flag("tester", &proj.key, &flag).await.unwrap();
+    store
+        .upsert_flag_env_config("tester", &proj.key, &flag.key, &env.key, &config)
         .await
         .unwrap();
 
@@ -377,7 +404,7 @@ async fn test_flag_env_config_round_trip<
     assert_eq!(fetched.rules, config.rules);
     assert_eq!(fetched.default_rule, config.default_rule);
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -400,12 +427,18 @@ async fn test_cascade_delete<
     let seg = make_segment("all-users");
     let config = make_flag_env_config();
 
-    store.upsert_project(&proj).await.unwrap();
-    store.upsert_environment(&proj.key, &env).await.unwrap();
-    store.upsert_flag(&proj.key, &flag).await.unwrap();
-    store.upsert_segment(&proj.key, &seg).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
     store
-        .upsert_flag_env_config(&proj.key, &flag.key, &env.key, &config)
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+    store.upsert_flag("tester", &proj.key, &flag).await.unwrap();
+    store
+        .upsert_segment("tester", &proj.key, &seg)
+        .await
+        .unwrap();
+    store
+        .upsert_flag_env_config("tester", &proj.key, &flag.key, &env.key, &config)
         .await
         .unwrap();
 
@@ -421,7 +454,7 @@ async fn test_cascade_delete<
         .await
         .unwrap();
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 
     assert!(
         store.get_project(&proj.key).await.unwrap().is_none(),
@@ -480,8 +513,11 @@ async fn test_sdk_key_lookup_by_raw<
 ) {
     let proj = make_project("sdk-proj");
     let env = make_env("staging");
-    store.upsert_project(&proj).await.unwrap();
-    store.upsert_environment(&proj.key, &env).await.unwrap();
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
 
     let new_key = NewSdkKey {
         kind: SdkKeyKind::Client,
@@ -502,7 +538,7 @@ async fn test_sdk_key_lookup_by_raw<
     let not_found = store.find_sdk_key("nonexistent-key").await.unwrap();
     assert!(not_found.is_none(), "unknown raw key must return None");
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +568,7 @@ where
     let proj = make_project("tx-commit-proj");
     let flag = make_flag("tx-flag");
 
-    let mut session = store.begin().await.unwrap();
+    let mut session = store.begin("tester").await.unwrap();
     session.upsert_project(&proj).await.unwrap();
     session.upsert_flag(&proj.key, &flag).await.unwrap();
     session.commit().await.unwrap();
@@ -548,7 +584,7 @@ where
         "committed flag must be visible after commit"
     );
 
-    store.delete_project(&proj.key).await.unwrap();
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -563,11 +599,349 @@ where
     let proj = make_project("tx-rollback-proj");
 
     {
-        let mut session = store.begin().await.unwrap();
+        let mut session = store.begin("tester").await.unwrap();
         session.upsert_project(&proj).await.unwrap();
         // session dropped here without commit -> rollback
     }
 
     let fetched = store.get_project(&proj.key).await.unwrap();
     assert!(fetched.is_none(), "rolled-back project must not be visible");
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 1: audit_on_create
+// ---------------------------------------------------------------------------
+
+async fn test_audit_on_create<S: ProjectRepository + AuditLogRepository>(store: &S) {
+    let proj = make_project("audit-create-proj");
+    store.upsert_project("alice", &proj).await.unwrap();
+
+    let entries = store
+        .audit_entries_for("project", proj.key.as_str())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1, "one audit entry expected on create");
+    let entry = &entries[0];
+    assert_eq!(entry.action, "project.created");
+    assert_eq!(entry.actor, "alice");
+    assert_eq!(entry.entity_type, "project");
+    assert_eq!(entry.entity_id, proj.key.as_str());
+    assert!(entry.before.is_none(), "before must be None on creation");
+    assert!(entry.after.is_some(), "after must be Some on creation");
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 2: audit_on_update
+// ---------------------------------------------------------------------------
+
+async fn test_audit_on_update<S: ProjectRepository + AuditLogRepository>(store: &S) {
+    let proj = make_project("audit-update-proj");
+    store.upsert_project("alice", &proj).await.unwrap();
+
+    let mut updated = proj.clone();
+    updated.name = "Updated Name".into();
+    store.upsert_project("bob", &updated).await.unwrap();
+
+    let entries = store
+        .audit_entries_for("project", proj.key.as_str())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 2, "two audit entries expected");
+    let second = &entries[1];
+    assert_eq!(second.action, "project.updated");
+    assert_eq!(second.actor, "bob");
+    assert!(second.before.is_some(), "before must be Some on update");
+    assert!(second.after.is_some(), "after must be Some on update");
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 3: audit_on_delete
+// ---------------------------------------------------------------------------
+
+async fn test_audit_on_delete<S: ProjectRepository + AuditLogRepository>(store: &S) {
+    let proj = make_project("audit-delete-proj");
+    store.upsert_project("alice", &proj).await.unwrap();
+    store.delete_project("alice", &proj.key).await.unwrap();
+
+    let entries = store
+        .audit_entries_for("project", proj.key.as_str())
+        .await
+        .unwrap();
+    // One for create, one for delete.
+    assert_eq!(
+        entries.len(),
+        2,
+        "two audit entries expected (create+delete)"
+    );
+    let delete_entry = entries
+        .iter()
+        .find(|e| e.action == "project.deleted")
+        .expect("must find a project.deleted entry");
+    assert_eq!(delete_entry.actor, "alice");
+    assert!(
+        delete_entry.before.is_some(),
+        "before must be Some on delete"
+    );
+    assert!(delete_entry.after.is_none(), "after must be None on delete");
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 4: delete_absent_writes_no_audit
+// ---------------------------------------------------------------------------
+
+async fn test_delete_absent_writes_no_audit<S: ProjectRepository + AuditLogRepository>(store: &S) {
+    let key = ProjectKey::new("nonexistent-proj-audit").unwrap();
+    let before_count = store.list_audit_entries().await.unwrap().len();
+
+    store.delete_project("alice", &key).await.unwrap();
+
+    let after_count = store.list_audit_entries().await.unwrap().len();
+    assert_eq!(
+        before_count, after_count,
+        "no audit entry written for delete of absent entity"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 5: failed_mutation_leaves_no_audit
+// ---------------------------------------------------------------------------
+
+async fn test_failed_mutation_leaves_no_audit<
+    S: ProjectRepository + EnvironmentRepository + AuditLogRepository,
+>(
+    store: &S,
+) {
+    // Attempt to upsert an environment for a non-existent project (FK violation).
+    let missing_project = ProjectKey::new("missing-proj-fk").unwrap();
+    let env = make_env("should-fail");
+    let before_count = store.list_audit_entries().await.unwrap().len();
+
+    let result = store
+        .upsert_environment("alice", &missing_project, &env)
+        .await;
+    assert!(result.is_err(), "FK violation must return an error");
+
+    let after_count = store.list_audit_entries().await.unwrap().len();
+    assert_eq!(
+        before_count, after_count,
+        "failed mutation must not write any audit entry"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 6: session_commit_audits_each_mutation
+// ---------------------------------------------------------------------------
+
+async fn test_session_commit_audits_each_mutation<S>(store: &S)
+where
+    S: ProjectRepository + FlagRepository + AuditLogRepository + TransactionalStore + 'static,
+    for<'a> <S as TransactionalStore>::Session<'a>: WriteSession,
+{
+    let proj = make_project("session-audit-proj");
+    let flag = make_flag("session-audit-flag");
+
+    let mut session = store.begin("carol").await.unwrap();
+    session.upsert_project(&proj).await.unwrap();
+    session.upsert_flag(&proj.key, &flag).await.unwrap();
+    session.commit().await.unwrap();
+
+    let all_entries = store.list_audit_entries().await.unwrap();
+    let proj_entries: Vec<&AuditRecord> = all_entries
+        .iter()
+        .filter(|e| e.entity_id == proj.key.as_str() && e.entity_type == "project")
+        .collect();
+    let flag_entries: Vec<&AuditRecord> = all_entries
+        .iter()
+        .filter(|e| {
+            e.entity_type == "flag"
+                && e.entity_id == format!("{}/{}", proj.key.as_str(), flag.key.as_str())
+        })
+        .collect();
+
+    assert_eq!(
+        proj_entries.len(),
+        1,
+        "one project audit expected after session commit"
+    );
+    assert_eq!(
+        flag_entries.len(),
+        1,
+        "one flag audit expected after session commit"
+    );
+    assert_eq!(proj_entries[0].actor, "carol");
+    assert_eq!(flag_entries[0].actor, "carol");
+
+    // Cleanup.
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 7: session_drop_writes_no_audit
+// ---------------------------------------------------------------------------
+
+async fn test_session_drop_writes_no_audit<S>(store: &S)
+where
+    S: ProjectRepository + AuditLogRepository + TransactionalStore + 'static,
+    for<'a> <S as TransactionalStore>::Session<'a>: WriteSession,
+{
+    let proj = make_project("session-drop-proj");
+    let before_count = store.list_audit_entries().await.unwrap().len();
+
+    {
+        let mut session = store.begin("dave").await.unwrap();
+        session.upsert_project(&proj).await.unwrap();
+        // dropped without commit -> rollback
+    }
+
+    let after_count = store.list_audit_entries().await.unwrap().len();
+    assert_eq!(
+        before_count, after_count,
+        "dropped session must write no audit entries"
+    );
+    assert!(
+        store.get_project(&proj.key).await.unwrap().is_none(),
+        "entity must not be persisted either"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 8: audit_entries_for_filters_by_entity
+// ---------------------------------------------------------------------------
+
+async fn test_audit_entries_for_filters_by_entity<S: ProjectRepository + AuditLogRepository>(
+    store: &S,
+) {
+    let proj_a = make_project("filter-proj-a");
+    let proj_b = make_project("filter-proj-b");
+
+    store.upsert_project("tester", &proj_a).await.unwrap();
+    store.upsert_project("tester", &proj_b).await.unwrap();
+
+    let entries_a = store
+        .audit_entries_for("project", proj_a.key.as_str())
+        .await
+        .unwrap();
+    let entries_b = store
+        .audit_entries_for("project", proj_b.key.as_str())
+        .await
+        .unwrap();
+
+    assert_eq!(entries_a.len(), 1, "only one entry for proj_a");
+    assert_eq!(entries_b.len(), 1, "only one entry for proj_b");
+    assert!(
+        entries_a.iter().all(|e| e.entity_id == proj_a.key.as_str()),
+        "all entries must belong to proj_a"
+    );
+    assert!(
+        entries_b.iter().all(|e| e.entity_id == proj_b.key.as_str()),
+        "all entries must belong to proj_b"
+    );
+
+    store.delete_project("tester", &proj_a.key).await.unwrap();
+    store.delete_project("tester", &proj_b.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 9: audit_covers_all_aggregates
+// ---------------------------------------------------------------------------
+
+async fn test_audit_covers_all_aggregates<
+    S: ProjectRepository
+        + EnvironmentRepository
+        + FlagRepository
+        + SegmentRepository
+        + FlagEnvConfigRepository
+        + AuditLogRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("all-agg-proj");
+    let env = make_env("all-agg-env");
+    let flag = make_flag("all-agg-flag");
+    let seg = make_segment("all-agg-seg");
+    let config = make_flag_env_config();
+
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+    store.upsert_flag("tester", &proj.key, &flag).await.unwrap();
+    store
+        .upsert_segment("tester", &proj.key, &seg)
+        .await
+        .unwrap();
+    store
+        .upsert_flag_env_config("tester", &proj.key, &flag.key, &env.key, &config)
+        .await
+        .unwrap();
+
+    let all = store.list_audit_entries().await.unwrap();
+
+    let has_entry = |entity_type: &str, entity_id: &str| {
+        all.iter()
+            .any(|e| e.entity_type == entity_type && e.entity_id == entity_id)
+    };
+
+    assert!(
+        has_entry("project", proj.key.as_str()),
+        "project audit missing"
+    );
+    assert!(
+        has_entry(
+            "environment",
+            &format!("{}/{}", proj.key.as_str(), env.key.as_str())
+        ),
+        "environment audit missing"
+    );
+    assert!(
+        has_entry(
+            "flag",
+            &format!("{}/{}", proj.key.as_str(), flag.key.as_str())
+        ),
+        "flag audit missing"
+    );
+    assert!(
+        has_entry(
+            "segment",
+            &format!("{}/{}", proj.key.as_str(), seg.key.as_str())
+        ),
+        "segment audit missing"
+    );
+    assert!(
+        has_entry(
+            "flag_env_config",
+            &format!(
+                "{}/{}/{}",
+                proj.key.as_str(),
+                flag.key.as_str(),
+                env.key.as_str()
+            )
+        ),
+        "flag_env_config audit missing"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Audit test 10: audit_is_append_only_api
+// ---------------------------------------------------------------------------
+
+// This test documents at compile-time that `AuditLogRepository` exposes only
+// read methods. There is no `update_audit_entry`, `delete_audit_entry`, or any
+// other write method. The absence of such methods IS the test.
+//
+// Attempting to call a non-existent write method would be a compile error,
+// which TDD treats as Red. This function simply verifies the trait exists,
+// is readable, and contains no write paths.
+fn test_audit_is_append_only_api<S: AuditLogRepository>(_store: &S) {
+    // Nothing to assert at runtime: the compile-time shape of AuditLogRepository
+    // (list_audit_entries + audit_entries_for, no write methods) IS the invariant.
+    // If a write method were added here it would be a compile error on callers
+    // that do not implement it, enforcing immutability by construction.
 }

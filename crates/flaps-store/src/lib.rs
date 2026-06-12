@@ -28,6 +28,7 @@
 
 mod clock;
 
+pub mod audit;
 pub mod error;
 pub mod hash;
 pub mod postgres;
@@ -35,6 +36,7 @@ pub mod repository;
 pub mod sdk_key;
 pub mod sqlite;
 
+pub use audit::AuditRecord;
 pub use error::{StoreError, StoreResult};
 pub use hash::KeyHasher;
 pub use sdk_key::{NewSdkKey, SdkKeyRecord, SdkKeyScope};
