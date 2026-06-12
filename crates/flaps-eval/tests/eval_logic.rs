@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use flaps_eval::{EvaluationContext, EvaluationError, FlagSet};
+use flaps_eval::{EvaluationContext, FlagSet};
 
 /// Builds a flag set with a single boolean probe flag using the targeting.
 fn probe_set(targeting_json: &str) -> FlagSet {
@@ -404,20 +404,21 @@ fn missing_some_requires_a_minimum_of_present_keys() {
 }
 
 #[test]
-fn custom_operations_surface_unsupported_errors() {
+fn custom_operations_evaluate_successfully() {
+    // All four flagd custom operators must produce a valid resolution now that
+    // they are implemented.  The exact variant is not asserted here; the
+    // dedicated `eval_custom_operators` integration tests cover correctness.
+    // `$ref` is the only operator that remains unsupported at eval time
+    // (references are inlined at parse time and should never reach the engine).
     let fixtures = [
-        r#"{"fractional": [["a", 50], ["b", 50]]}"#,
+        r#"{"fractional": [["true", 50], ["false", 50]]}"#,
         r#"{"sem_ver": ["1.1.2", ">=", "1.0.0"]}"#,
         r#"{"starts_with": ["192.168.0.1", "192.168"]}"#,
         r#"{"ends_with": ["noreply@example.com", "@example.com"]}"#,
     ];
     for targeting in fixtures {
-        let error = probe_set(targeting)
+        probe_set(targeting)
             .evaluate("probe", &EvaluationContext::default())
-            .expect_err("custom operations are not implemented yet");
-        assert!(matches!(
-            error,
-            EvaluationError::UnsupportedOperation { .. }
-        ));
+            .expect("custom operations must not return an error");
     }
 }

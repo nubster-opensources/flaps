@@ -19,6 +19,9 @@
 use serde_json::{Value, json};
 
 use crate::eval::EvaluationError;
+use crate::fractional::eval_fractional;
+use crate::semver::eval_sem_ver;
+use crate::string_comparison::{Affix, eval_string_comparison};
 use crate::targeting::{Literal, Rule};
 
 /// Reduces a rule against the current data scope.
@@ -85,10 +88,12 @@ pub(crate) fn apply(rule: &Rule, data: &Value) -> Result<Value, EvaluationError>
         Rule::All(array, test) => eval_all(array, test, data),
         Rule::None(array, test) => Ok(Value::Bool(!truthy(&eval_some(array, test, data)?))),
         Rule::Some(array, test) => eval_some(array, test, data),
-        Rule::StartsWith(_, _) => Err(unsupported("starts_with")),
-        Rule::EndsWith(_, _) => Err(unsupported("ends_with")),
-        Rule::SemVer { .. } => Err(unsupported("sem_ver")),
-        Rule::Fractional { .. } => Err(unsupported("fractional")),
+        Rule::StartsWith(left, right) => eval_string_comparison(Affix::Prefix, left, right, data),
+        Rule::EndsWith(left, right) => eval_string_comparison(Affix::Suffix, left, right, data),
+        Rule::SemVer { value, op, version } => eval_sem_ver(value, *op, version, data),
+        Rule::Fractional { bucket_by, buckets } => {
+            eval_fractional(bucket_by.as_deref(), buckets, data)
+        }
         Rule::Ref(_) => Err(unsupported("$ref")),
     }
 }
