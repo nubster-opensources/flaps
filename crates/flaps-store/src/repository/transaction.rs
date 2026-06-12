@@ -4,9 +4,9 @@
 //! transaction. The transaction is committed by calling [`WriteSession::commit`]
 //! and is rolled back automatically when the session is dropped without committing.
 //!
-//! This seam is the extension point for issue #17 (audit log): a future
-//! `append_audit` method will be added to [`WriteSession`] so that audit
-//! entries land in the same transaction as the mutations they describe.
+//! Each mutation in the session is attributed to the `actor` supplied to
+//! [`TransactionalStore::begin`]. Audit entries are appended within the same
+//! transaction as the mutation they describe.
 
 use flaps_domain::{
     Environment, EnvironmentKey, Flag, FlagEnvConfig, FlagKey, Project, ProjectKey, Segment,
@@ -22,8 +22,12 @@ pub trait TransactionalStore {
     where
         Self: 'a;
 
-    /// Begins a transactional write session.
-    async fn begin(&self) -> StoreResult<Self::Session<'_>>;
+    /// Begins a transactional write session attributed to `actor`.
+    ///
+    /// Every mutation performed on the returned [`WriteSession`] is attributed
+    /// to `actor` in the audit log. The transaction is committed by calling
+    /// [`WriteSession::commit`] and is rolled back automatically on drop.
+    async fn begin(&self, actor: &str) -> StoreResult<Self::Session<'_>>;
 }
 
 /// A set of mutations bound to one database transaction.

@@ -11,9 +11,11 @@ use flaps_domain::{
 };
 
 use crate::{
+    audit::{AuditRecord, sqlite::append_audit},
     error::{StoreError, StoreResult},
     hash::KeyHasher,
     repository::{
+        audit_log::AuditLogRepository,
         environment::EnvironmentRepository,
         flag::FlagRepository,
         flag_env_config::FlagEnvConfigRepository,
@@ -59,6 +61,151 @@ fn domain_key_err(e: &flaps_domain::DomainError) -> StoreError {
     StoreError::Serialization(
         serde_json::from_str::<serde_json::Value>(&format!("\"{e}\"")).unwrap_err(),
     )
+}
+
+fn row_to_project(
+    k: String,
+    name: String,
+    desc: Option<String>,
+    ext_ref: Option<String>,
+    mb: &str,
+) -> StoreResult<Project> {
+    Ok(Project {
+        key: ProjectKey::new(k).map_err(|e| domain_key_err(&e))?,
+        name,
+        description: desc,
+        external_ref: ext_ref.map(ExternalRef::new),
+        managed_by: managed_by_from_str(mb)?,
+    })
+}
+
+fn row_to_environment(
+    k: String,
+    name: String,
+    ext_ref: Option<String>,
+    mb: &str,
+) -> StoreResult<Environment> {
+    Ok(Environment {
+        key: EnvironmentKey::new(k).map_err(|e| domain_key_err(&e))?,
+        name,
+        external_ref: ext_ref.map(ExternalRef::new),
+        managed_by: managed_by_from_str(mb)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Generic read helpers (pool and &mut Transaction both implement Executor)
+// ---------------------------------------------------------------------------
+
+async fn do_get_project<'e, E>(executor: E, key: &ProjectKey) -> StoreResult<Option<Project>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row: Option<ProjectRow> = sqlx::query_as(
+        "SELECT key, name, description, external_ref, managed_by FROM projects WHERE key = ?",
+    )
+    .bind(key.as_str())
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|(k, name, desc, ext_ref, mb)| row_to_project(k, name, desc, ext_ref, &mb))
+        .transpose()
+}
+
+async fn do_get_environment<'e, E>(
+    executor: E,
+    project: &ProjectKey,
+    key: &EnvironmentKey,
+) -> StoreResult<Option<Environment>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row: Option<EnvRow> = sqlx::query_as(
+        "SELECT key, name, external_ref, managed_by FROM environments WHERE project_key = ? AND key = ?",
+    )
+    .bind(project.as_str())
+    .bind(key.as_str())
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|(k, name, ext_ref, mb)| row_to_environment(k, name, ext_ref, &mb))
+        .transpose()
+}
+
+async fn do_get_flag<'e, E>(
+    executor: E,
+    project: &ProjectKey,
+    key: &FlagKey,
+) -> StoreResult<Option<Flag>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row: Option<FlagRow> = sqlx::query_as(
+        "SELECT key, name, description, flag_type, value_type, variants_json FROM flags WHERE project_key = ? AND key = ?",
+    )
+    .bind(project.as_str())
+    .bind(key.as_str())
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|(k, name, desc, ft, vt, vj)| {
+        Ok(Flag {
+            key: FlagKey::new(k).map_err(|e| domain_key_err(&e))?,
+            name,
+            description: desc,
+            flag_type: serde_json::from_str(&format!(r#""{ft}""#))?,
+            value_type: serde_json::from_str(&format!(r#""{vt}""#))?,
+            variants: serde_json::from_str(&vj)?,
+        })
+    })
+    .transpose()
+}
+
+async fn do_get_segment<'e, E>(
+    executor: E,
+    project: &ProjectKey,
+    key: &SegmentKey,
+) -> StoreResult<Option<Segment>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT key, name, match_json FROM segments WHERE project_key = ? AND key = ?",
+    )
+    .bind(project.as_str())
+    .bind(key.as_str())
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|(k, name, mj)| {
+        Ok(Segment {
+            key: SegmentKey::new(k).map_err(|e| domain_key_err(&e))?,
+            name,
+            match_expr: serde_json::from_str(&mj)?,
+        })
+    })
+    .transpose()
+}
+
+async fn do_get_flag_env_config<'e, E>(
+    executor: E,
+    project: &ProjectKey,
+    flag: &FlagKey,
+    environment: &EnvironmentKey,
+) -> StoreResult<Option<FlagEnvConfig>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT config_json FROM flag_env_configs WHERE project_key = ? AND flag_key = ? AND environment_key = ?",
+    )
+    .bind(project.as_str())
+    .bind(flag.as_str())
+    .bind(environment.as_str())
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|(cj,)| Ok(serde_json::from_str(&cj)?)).transpose()
 }
 
 // ---------------------------------------------------------------------------
@@ -259,13 +406,22 @@ fn embedded_migrator() -> Migrator {
 
     static MIGRATIONS: std::sync::OnceLock<Vec<Migration>> = std::sync::OnceLock::new();
     let migrations = MIGRATIONS.get_or_init(|| {
-        vec![Migration::new(
-            1,
-            Cow::Borrowed("init"),
-            MigrationType::Simple,
-            Cow::Borrowed(include_str!("../../migrations/sqlite/0001_init.sql")),
-            false,
-        )]
+        vec![
+            Migration::new(
+                1,
+                Cow::Borrowed("init"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../../migrations/sqlite/0001_init.sql")),
+                false,
+            ),
+            Migration::new(
+                2,
+                Cow::Borrowed("audit_log"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../../migrations/sqlite/0002_audit_log.sql")),
+                false,
+            ),
+        ]
     });
 
     Migrator {
@@ -337,28 +493,35 @@ impl SqliteStore {
 // ---------------------------------------------------------------------------
 
 impl ProjectRepository for SqliteStore {
-    async fn upsert_project(&self, project: &Project) -> StoreResult<()> {
-        do_upsert_project(&self.pool, project).await
+    async fn upsert_project(&self, actor: &str, project: &Project) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_project(&mut *tx, &project.key).await?;
+        do_upsert_project(&mut *tx, project).await?;
+        let action = if before.is_some() {
+            "project.updated"
+        } else {
+            "project.created"
+        };
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            entity_type: "project".to_owned(),
+            entity_id: project.key.as_str().to_owned(),
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(project).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn get_project(&self, key: &ProjectKey) -> StoreResult<Option<Project>> {
-        let row: Option<ProjectRow> = sqlx::query_as(
-            "SELECT key, name, description, external_ref, managed_by FROM projects WHERE key = ?",
-        )
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|(k, name, desc, ext_ref, mb)| {
-            Ok(Project {
-                key: ProjectKey::new(k).map_err(|e| domain_key_err(&e))?,
-                name,
-                description: desc,
-                external_ref: ext_ref.map(ExternalRef::new),
-                managed_by: managed_by_from_str(&mb)?,
-            })
-        })
-        .transpose()
+        do_get_project(&self.pool, key).await
     }
 
     async fn list_projects(&self) -> StoreResult<Vec<Project>> {
@@ -368,23 +531,32 @@ impl ProjectRepository for SqliteStore {
                 .await?;
 
         rows.into_iter()
-            .map(|(k, name, desc, ext_ref, mb)| {
-                Ok(Project {
-                    key: ProjectKey::new(k).map_err(|e| domain_key_err(&e))?,
-                    name,
-                    description: desc,
-                    external_ref: ext_ref.map(ExternalRef::new),
-                    managed_by: managed_by_from_str(&mb)?,
-                })
-            })
+            .map(|(k, name, desc, ext_ref, mb)| row_to_project(k, name, desc, ext_ref, &mb))
             .collect()
     }
 
-    async fn delete_project(&self, key: &ProjectKey) -> StoreResult<()> {
+    async fn delete_project(&self, actor: &str, key: &ProjectKey) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_project(&mut *tx, key).await?;
+        let Some(before_val) = before else {
+            tx.commit().await?;
+            return Ok(());
+        };
         sqlx::query("DELETE FROM projects WHERE key = ?")
             .bind(key.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "project.deleted".to_owned(),
+            entity_type: "project".to_owned(),
+            entity_id: key.as_str().to_owned(),
+            before: Some(serde_json::to_value(&before_val).map_err(StoreError::Serialization)?),
+            after: None,
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -394,8 +566,37 @@ impl ProjectRepository for SqliteStore {
 // ---------------------------------------------------------------------------
 
 impl EnvironmentRepository for SqliteStore {
-    async fn upsert_environment(&self, project: &ProjectKey, env: &Environment) -> StoreResult<()> {
-        do_upsert_environment(&self.pool, project, env).await
+    async fn upsert_environment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        env: &Environment,
+    ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_environment(&mut *tx, project, &env.key).await?;
+        do_upsert_environment(&mut *tx, project, env).await?;
+        let action = if before.is_some() {
+            "environment.updated"
+        } else {
+            "environment.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), env.key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            entity_type: "environment".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(env).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn get_environment(
@@ -403,23 +604,7 @@ impl EnvironmentRepository for SqliteStore {
         project: &ProjectKey,
         key: &EnvironmentKey,
     ) -> StoreResult<Option<Environment>> {
-        let row: Option<EnvRow> = sqlx::query_as(
-            "SELECT key, name, external_ref, managed_by FROM environments WHERE project_key = ? AND key = ?",
-        )
-        .bind(project.as_str())
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|(k, name, ext_ref, mb)| {
-            Ok(Environment {
-                key: EnvironmentKey::new(k).map_err(|e| domain_key_err(&e))?,
-                name,
-                external_ref: ext_ref.map(ExternalRef::new),
-                managed_by: managed_by_from_str(&mb)?,
-            })
-        })
-        .transpose()
+        do_get_environment(&self.pool, project, key).await
     }
 
     async fn list_environments(&self, project: &ProjectKey) -> StoreResult<Vec<Environment>> {
@@ -431,27 +616,39 @@ impl EnvironmentRepository for SqliteStore {
         .await?;
 
         rows.into_iter()
-            .map(|(k, name, ext_ref, mb)| {
-                Ok(Environment {
-                    key: EnvironmentKey::new(k).map_err(|e| domain_key_err(&e))?,
-                    name,
-                    external_ref: ext_ref.map(ExternalRef::new),
-                    managed_by: managed_by_from_str(&mb)?,
-                })
-            })
+            .map(|(k, name, ext_ref, mb)| row_to_environment(k, name, ext_ref, &mb))
             .collect()
     }
 
     async fn delete_environment(
         &self,
+        actor: &str,
         project: &ProjectKey,
         key: &EnvironmentKey,
     ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_environment(&mut *tx, project, key).await?;
+        let Some(before_val) = before else {
+            tx.commit().await?;
+            return Ok(());
+        };
         sqlx::query("DELETE FROM environments WHERE project_key = ? AND key = ?")
             .bind(project.as_str())
             .bind(key.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        let entity_id = format!("{}/{}", project.as_str(), key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "environment.deleted".to_owned(),
+            entity_type: "environment".to_owned(),
+            entity_id,
+            before: Some(serde_json::to_value(&before_val).map_err(StoreError::Serialization)?),
+            after: None,
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -461,30 +658,36 @@ impl EnvironmentRepository for SqliteStore {
 // ---------------------------------------------------------------------------
 
 impl FlagRepository for SqliteStore {
-    async fn upsert_flag(&self, project: &ProjectKey, flag: &Flag) -> StoreResult<()> {
-        do_upsert_flag(&self.pool, project, flag).await
+    async fn upsert_flag(&self, actor: &str, project: &ProjectKey, flag: &Flag) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_flag(&mut *tx, project, &flag.key).await?;
+        do_upsert_flag(&mut *tx, project, flag).await?;
+        let action = if before.is_some() {
+            "flag.updated"
+        } else {
+            "flag.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), flag.key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            entity_type: "flag".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(flag).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn get_flag(&self, project: &ProjectKey, key: &FlagKey) -> StoreResult<Option<Flag>> {
-        let row: Option<FlagRow> = sqlx::query_as(
-            "SELECT key, name, description, flag_type, value_type, variants_json FROM flags WHERE project_key = ? AND key = ?",
-        )
-        .bind(project.as_str())
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|(k, name, desc, ft, vt, vj)| {
-            Ok(Flag {
-                key: FlagKey::new(k).map_err(|e| domain_key_err(&e))?,
-                name,
-                description: desc,
-                flag_type: serde_json::from_str(&format!(r#""{ft}""#))?,
-                value_type: serde_json::from_str(&format!(r#""{vt}""#))?,
-                variants: serde_json::from_str(&vj)?,
-            })
-        })
-        .transpose()
+        do_get_flag(&self.pool, project, key).await
     }
 
     async fn list_flags(&self, project: &ProjectKey) -> StoreResult<Vec<Flag>> {
@@ -509,12 +712,35 @@ impl FlagRepository for SqliteStore {
             .collect()
     }
 
-    async fn delete_flag(&self, project: &ProjectKey, key: &FlagKey) -> StoreResult<()> {
+    async fn delete_flag(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        key: &FlagKey,
+    ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_flag(&mut *tx, project, key).await?;
+        let Some(before_val) = before else {
+            tx.commit().await?;
+            return Ok(());
+        };
         sqlx::query("DELETE FROM flags WHERE project_key = ? AND key = ?")
             .bind(project.as_str())
             .bind(key.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        let entity_id = format!("{}/{}", project.as_str(), key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "flag.deleted".to_owned(),
+            entity_type: "flag".to_owned(),
+            entity_id,
+            before: Some(serde_json::to_value(&before_val).map_err(StoreError::Serialization)?),
+            after: None,
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -524,8 +750,37 @@ impl FlagRepository for SqliteStore {
 // ---------------------------------------------------------------------------
 
 impl SegmentRepository for SqliteStore {
-    async fn upsert_segment(&self, project: &ProjectKey, segment: &Segment) -> StoreResult<()> {
-        do_upsert_segment(&self.pool, project, segment).await
+    async fn upsert_segment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        segment: &Segment,
+    ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_segment(&mut *tx, project, &segment.key).await?;
+        do_upsert_segment(&mut *tx, project, segment).await?;
+        let action = if before.is_some() {
+            "segment.updated"
+        } else {
+            "segment.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), segment.key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            entity_type: "segment".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(segment).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn get_segment(
@@ -533,22 +788,7 @@ impl SegmentRepository for SqliteStore {
         project: &ProjectKey,
         key: &SegmentKey,
     ) -> StoreResult<Option<Segment>> {
-        let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT key, name, match_json FROM segments WHERE project_key = ? AND key = ?",
-        )
-        .bind(project.as_str())
-        .bind(key.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|(k, name, mj)| {
-            Ok(Segment {
-                key: SegmentKey::new(k).map_err(|e| domain_key_err(&e))?,
-                name,
-                match_expr: serde_json::from_str(&mj)?,
-            })
-        })
-        .transpose()
+        do_get_segment(&self.pool, project, key).await
     }
 
     async fn list_segments(&self, project: &ProjectKey) -> StoreResult<Vec<Segment>> {
@@ -569,12 +809,35 @@ impl SegmentRepository for SqliteStore {
             .collect()
     }
 
-    async fn delete_segment(&self, project: &ProjectKey, key: &SegmentKey) -> StoreResult<()> {
+    async fn delete_segment(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        key: &SegmentKey,
+    ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_segment(&mut *tx, project, key).await?;
+        let Some(before_val) = before else {
+            tx.commit().await?;
+            return Ok(());
+        };
         sqlx::query("DELETE FROM segments WHERE project_key = ? AND key = ?")
             .bind(project.as_str())
             .bind(key.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        let entity_id = format!("{}/{}", project.as_str(), key.as_str());
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "segment.deleted".to_owned(),
+            entity_type: "segment".to_owned(),
+            entity_id,
+            before: Some(serde_json::to_value(&before_val).map_err(StoreError::Serialization)?),
+            after: None,
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -586,12 +849,42 @@ impl SegmentRepository for SqliteStore {
 impl FlagEnvConfigRepository for SqliteStore {
     async fn upsert_flag_env_config(
         &self,
+        actor: &str,
         project: &ProjectKey,
         flag: &FlagKey,
         environment: &EnvironmentKey,
         config: &FlagEnvConfig,
     ) -> StoreResult<()> {
-        do_upsert_flag_env_config(&self.pool, project, flag, environment, config).await
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_flag_env_config(&mut *tx, project, flag, environment).await?;
+        do_upsert_flag_env_config(&mut *tx, project, flag, environment, config).await?;
+        let action = if before.is_some() {
+            "flag_env_config.updated"
+        } else {
+            "flag_env_config.created"
+        };
+        let entity_id = format!(
+            "{}/{}/{}",
+            project.as_str(),
+            flag.as_str(),
+            environment.as_str()
+        );
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            entity_type: "flag_env_config".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(config).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn get_flag_env_config(
@@ -600,32 +893,47 @@ impl FlagEnvConfigRepository for SqliteStore {
         flag: &FlagKey,
         environment: &EnvironmentKey,
     ) -> StoreResult<Option<FlagEnvConfig>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT config_json FROM flag_env_configs WHERE project_key = ? AND flag_key = ? AND environment_key = ?",
-        )
-        .bind(project.as_str())
-        .bind(flag.as_str())
-        .bind(environment.as_str())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        row.map(|(cj,)| Ok(serde_json::from_str(&cj)?)).transpose()
+        do_get_flag_env_config(&self.pool, project, flag, environment).await
     }
 
     async fn delete_flag_env_config(
         &self,
+        actor: &str,
         project: &ProjectKey,
         flag: &FlagKey,
         environment: &EnvironmentKey,
     ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let before = do_get_flag_env_config(&mut *tx, project, flag, environment).await?;
+        let Some(before_val) = before else {
+            tx.commit().await?;
+            return Ok(());
+        };
         sqlx::query(
             "DELETE FROM flag_env_configs WHERE project_key = ? AND flag_key = ? AND environment_key = ?",
         )
         .bind(project.as_str())
         .bind(flag.as_str())
         .bind(environment.as_str())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        let entity_id = format!(
+            "{}/{}/{}",
+            project.as_str(),
+            flag.as_str(),
+            environment.as_str()
+        );
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "flag_env_config.deleted".to_owned(),
+            entity_type: "flag_env_config".to_owned(),
+            entity_id,
+            before: Some(serde_json::to_value(&before_val).map_err(StoreError::Serialization)?),
+            after: None,
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *tx, &record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -695,26 +1003,150 @@ impl SdkKeyRepository for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// AuditLogRepository for SqliteStore
+// ---------------------------------------------------------------------------
+
+type AuditRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn row_to_audit_record(
+    actor: String,
+    action: String,
+    entity_type: String,
+    entity_id: String,
+    before_json: Option<String>,
+    after_json: Option<String>,
+    occurred_at: String,
+) -> StoreResult<AuditRecord> {
+    let before = before_json
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(StoreError::Serialization)?;
+    let after = after_json
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(StoreError::Serialization)?;
+    Ok(AuditRecord {
+        actor,
+        action,
+        entity_type,
+        entity_id,
+        before,
+        after,
+        occurred_at,
+    })
+}
+
+impl AuditLogRepository for SqliteStore {
+    async fn list_audit_entries(&self) -> StoreResult<Vec<AuditRecord>> {
+        let rows: Vec<AuditRow> = sqlx::query_as(
+            "SELECT actor, action, entity_type, entity_id, before_json, after_json, occurred_at \
+             FROM audit_log ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(
+                |(actor, action, entity_type, entity_id, before_json, after_json, occurred_at)| {
+                    row_to_audit_record(
+                        actor,
+                        action,
+                        entity_type,
+                        entity_id,
+                        before_json,
+                        after_json,
+                        occurred_at,
+                    )
+                },
+            )
+            .collect()
+    }
+
+    async fn audit_entries_for(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> StoreResult<Vec<AuditRecord>> {
+        let rows: Vec<AuditRow> = sqlx::query_as(
+            "SELECT actor, action, entity_type, entity_id, before_json, after_json, occurred_at \
+             FROM audit_log WHERE entity_type = ? AND entity_id = ? ORDER BY id ASC",
+        )
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(
+                |(actor, action, entity_type, entity_id, before_json, after_json, occurred_at)| {
+                    row_to_audit_record(
+                        actor,
+                        action,
+                        entity_type,
+                        entity_id,
+                        before_json,
+                        after_json,
+                        occurred_at,
+                    )
+                },
+            )
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TransactionalStore for SqliteStore
 // ---------------------------------------------------------------------------
 
 /// A write session bound to a single SQLite transaction.
 pub struct SqliteWriteSession<'a> {
     tx: Transaction<'a, Sqlite>,
+    actor: String,
 }
 
 impl TransactionalStore for SqliteStore {
     type Session<'a> = SqliteWriteSession<'a>;
 
-    async fn begin(&self) -> StoreResult<Self::Session<'_>> {
+    async fn begin(&self, actor: &str) -> StoreResult<Self::Session<'_>> {
         let tx = self.pool.begin().await?;
-        Ok(SqliteWriteSession { tx })
+        Ok(SqliteWriteSession {
+            tx,
+            actor: actor.to_owned(),
+        })
     }
 }
 
 impl WriteSession for SqliteWriteSession<'_> {
     async fn upsert_project(&mut self, project: &Project) -> StoreResult<()> {
-        do_upsert_project(&mut *self.tx, project).await
+        let before = do_get_project(&mut *self.tx, &project.key).await?;
+        do_upsert_project(&mut *self.tx, project).await?;
+        let action = if before.is_some() {
+            "project.updated"
+        } else {
+            "project.created"
+        };
+        let record = AuditRecord {
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            entity_type: "project".to_owned(),
+            entity_id: project.key.as_str().to_owned(),
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(project).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *self.tx, &record).await
     }
 
     async fn upsert_environment(
@@ -722,15 +1154,78 @@ impl WriteSession for SqliteWriteSession<'_> {
         project: &ProjectKey,
         env: &Environment,
     ) -> StoreResult<()> {
-        do_upsert_environment(&mut *self.tx, project, env).await
+        let before = do_get_environment(&mut *self.tx, project, &env.key).await?;
+        do_upsert_environment(&mut *self.tx, project, env).await?;
+        let action = if before.is_some() {
+            "environment.updated"
+        } else {
+            "environment.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), env.key.as_str());
+        let record = AuditRecord {
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            entity_type: "environment".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(env).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *self.tx, &record).await
     }
 
     async fn upsert_flag(&mut self, project: &ProjectKey, flag: &Flag) -> StoreResult<()> {
-        do_upsert_flag(&mut *self.tx, project, flag).await
+        let before = do_get_flag(&mut *self.tx, project, &flag.key).await?;
+        do_upsert_flag(&mut *self.tx, project, flag).await?;
+        let action = if before.is_some() {
+            "flag.updated"
+        } else {
+            "flag.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), flag.key.as_str());
+        let record = AuditRecord {
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            entity_type: "flag".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(flag).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *self.tx, &record).await
     }
 
     async fn upsert_segment(&mut self, project: &ProjectKey, segment: &Segment) -> StoreResult<()> {
-        do_upsert_segment(&mut *self.tx, project, segment).await
+        let before = do_get_segment(&mut *self.tx, project, &segment.key).await?;
+        do_upsert_segment(&mut *self.tx, project, segment).await?;
+        let action = if before.is_some() {
+            "segment.updated"
+        } else {
+            "segment.created"
+        };
+        let entity_id = format!("{}/{}", project.as_str(), segment.key.as_str());
+        let record = AuditRecord {
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            entity_type: "segment".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(segment).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *self.tx, &record).await
     }
 
     async fn upsert_flag_env_config(
@@ -740,7 +1235,33 @@ impl WriteSession for SqliteWriteSession<'_> {
         environment: &EnvironmentKey,
         config: &FlagEnvConfig,
     ) -> StoreResult<()> {
-        do_upsert_flag_env_config(&mut *self.tx, project, flag, environment, config).await
+        let before = do_get_flag_env_config(&mut *self.tx, project, flag, environment).await?;
+        do_upsert_flag_env_config(&mut *self.tx, project, flag, environment, config).await?;
+        let action = if before.is_some() {
+            "flag_env_config.updated"
+        } else {
+            "flag_env_config.created"
+        };
+        let entity_id = format!(
+            "{}/{}/{}",
+            project.as_str(),
+            flag.as_str(),
+            environment.as_str()
+        );
+        let record = AuditRecord {
+            actor: self.actor.clone(),
+            action: action.to_owned(),
+            entity_type: "flag_env_config".to_owned(),
+            entity_id,
+            before: before
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(StoreError::Serialization)?,
+            after: Some(serde_json::to_value(config).map_err(StoreError::Serialization)?),
+            occurred_at: crate::clock::now_rfc3339(),
+        };
+        append_audit(&mut *self.tx, &record).await
     }
 
     async fn commit(self) -> StoreResult<()> {
