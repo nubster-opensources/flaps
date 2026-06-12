@@ -1,6 +1,9 @@
 //! PostgreSQL backend: pool construction, migrations and repository implementations.
 
-use sqlx::{Executor, Pool, Postgres, Transaction};
+use sqlx::{
+    Executor, Pool, Postgres, Transaction,
+    migrate::{Migration, MigrationType, Migrator},
+};
 
 use flaps_domain::{
     Environment, EnvironmentKey, ExternalRef, Flag, FlagEnvConfig, FlagKey, ManagedBy, Project,
@@ -76,7 +79,7 @@ where
 {
     let external_ref = project.external_ref.as_ref().map(|r| r.as_str().to_owned());
     let managed_by = managed_by_str(project.managed_by);
-    let now = chrono_now();
+    let now = crate::clock::now_rfc3339();
 
     let result = sqlx::query(
         r"INSERT INTO projects (key, name, description, external_ref, managed_by, created_at, updated_at)
@@ -120,7 +123,7 @@ where
 {
     let external_ref = env.external_ref.as_ref().map(|r| r.as_str().to_owned());
     let managed_by = managed_by_str(env.managed_by);
-    let now = chrono_now();
+    let now = crate::clock::now_rfc3339();
 
     let result = sqlx::query(
         r"INSERT INTO environments (project_key, key, name, external_ref, managed_by, created_at, updated_at)
@@ -160,7 +163,7 @@ where
     let variants_json: serde_json::Value = serde_json::to_value(&flag.variants)?;
     let flag_type = serde_json::to_string(&flag.flag_type)?;
     let value_type = serde_json::to_string(&flag.value_type)?;
-    let now = chrono_now();
+    let now = crate::clock::now_rfc3339();
 
     sqlx::query(
         r"INSERT INTO flags (project_key, key, name, description, flag_type, value_type, variants_json, created_at, updated_at)
@@ -197,7 +200,7 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let match_json: serde_json::Value = serde_json::to_value(&segment.match_expr)?;
-    let now = chrono_now();
+    let now = crate::clock::now_rfc3339();
 
     sqlx::query(
         r"INSERT INTO segments (project_key, key, name, match_json, created_at, updated_at)
@@ -230,7 +233,7 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let config_json: serde_json::Value = serde_json::to_value(config)?;
-    let now = chrono_now();
+    let now = crate::clock::now_rfc3339();
 
     sqlx::query(
         r"INSERT INTO flag_env_configs (project_key, flag_key, environment_key, config_json, created_at, updated_at)
@@ -251,35 +254,34 @@ where
     Ok(())
 }
 
-/// Returns a timestamp string suitable for Postgres TIMESTAMPTZ.
-/// We use ISO-8601 format which Postgres parses natively.
-fn chrono_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let sec = secs % 60;
-    let min = (secs / 60) % 60;
-    let hour = (secs / 3600) % 24;
-    let days = secs / 86400;
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}+00:00")
-}
+// ---------------------------------------------------------------------------
+// Embedded migrations
+// ---------------------------------------------------------------------------
 
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let day_of_era = z % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let y = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let d = day_of_year - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+/// Returns a [`Migrator`] with the PostgreSQL schema embedded at compile time.
+///
+/// Avoids the `sqlx/macros` feature (which pulls in `sqlx-mysql` and transitively
+/// the vulnerable `rsa` crate) while keeping migrations in the binary.
+fn embedded_migrator() -> Migrator {
+    use std::borrow::Cow;
+
+    static MIGRATIONS: std::sync::OnceLock<Vec<Migration>> = std::sync::OnceLock::new();
+    let migrations = MIGRATIONS.get_or_init(|| {
+        vec![Migration::new(
+            1,
+            Cow::Borrowed("init"),
+            MigrationType::Simple,
+            Cow::Borrowed(include_str!("../../migrations/postgres/0001_init.sql")),
+            false,
+        )]
+    });
+
+    Migrator {
+        migrations: Cow::Owned(migrations.clone()),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +302,7 @@ impl PostgresStore {
     /// Returns [`StoreError`] if the connection or migrations fail.
     pub async fn connect(url: &str, hasher: KeyHasher) -> StoreResult<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new().connect(url).await?;
-        sqlx::migrate!("./migrations/postgres").run(&pool).await?;
+        embedded_migrator().run(&pool).await?;
         Ok(Self { pool, hasher })
     }
 }
@@ -619,7 +621,7 @@ impl SdkKeyRepository for PostgresStore {
         let prefix = raw_key.chars().take(12).collect::<String>();
         let kind_str = serde_json::to_string(&new_key.kind)?;
         let kind_str = kind_str.trim_matches('"');
-        let now = chrono_now();
+        let now = crate::clock::now_rfc3339();
 
         sqlx::query(
             r"INSERT INTO sdk_keys (key_hash, prefix, kind, project_key, environment_key, created_at)

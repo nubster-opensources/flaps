@@ -26,6 +26,8 @@
 //! # }
 //! ```
 
+mod clock;
+
 pub mod error;
 pub mod hash;
 pub mod postgres;
