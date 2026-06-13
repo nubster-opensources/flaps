@@ -1,5 +1,7 @@
 //! Repository trait for SDK key persistence.
 
+use std::future::Future;
+
 use crate::error::StoreResult;
 use crate::sdk_key::{NewSdkKey, SdkKeyRecord};
 
@@ -7,16 +9,21 @@ use crate::sdk_key::{NewSdkKey, SdkKeyRecord};
 ///
 /// Raw key values are hashed before storage; this trait never returns
 /// a raw key or its HMAC hash.
-#[allow(async_fn_in_trait)]
-pub trait SdkKeyRepository {
+pub trait SdkKeyRepository: Send + Sync {
     /// Hashes `raw_key` with the store's [`KeyHasher`](crate::KeyHasher), derives the
     /// readable prefix (the leading 12 characters of `raw_key`, or the whole value if
     /// shorter), and persists the secret-free record.
-    async fn create_sdk_key(&self, raw_key: &str, new_key: &NewSdkKey)
-    -> StoreResult<SdkKeyRecord>;
+    fn create_sdk_key(
+        &self,
+        raw_key: &str,
+        new_key: &NewSdkKey,
+    ) -> impl Future<Output = StoreResult<SdkKeyRecord>> + Send;
 
     /// Hashes `raw_key` and looks the record up by hash.
     ///
     /// Returns `None` if no key with a matching hash exists.
-    async fn find_sdk_key(&self, raw_key: &str) -> StoreResult<Option<SdkKeyRecord>>;
+    fn find_sdk_key(
+        &self,
+        raw_key: &str,
+    ) -> impl Future<Output = StoreResult<Option<SdkKeyRecord>>> + Send;
 }

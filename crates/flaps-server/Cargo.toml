@@ -12,6 +12,22 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+flaps-domain = { workspace = true }
+flaps-store = { workspace = true }
+flaps-compiler = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
 
 [lints]
 workspace = true

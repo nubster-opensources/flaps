@@ -8,6 +8,8 @@
 //! [`TransactionalStore::begin`]. Audit entries are appended within the same
 //! transaction as the mutation they describe.
 
+use std::future::Future;
+
 use flaps_domain::{
     Environment, EnvironmentKey, Flag, FlagEnvConfig, FlagKey, Project, ProjectKey, Segment,
 };
@@ -15,8 +17,7 @@ use flaps_domain::{
 use crate::error::StoreResult;
 
 /// A store that can open a write session spanning multiple mutations atomically.
-#[allow(async_fn_in_trait)]
-pub trait TransactionalStore {
+pub trait TransactionalStore: Send + Sync {
     /// The concrete session type returned by [`begin`](Self::begin).
     type Session<'a>: WriteSession
     where
@@ -27,7 +28,7 @@ pub trait TransactionalStore {
     /// Every mutation performed on the returned [`WriteSession`] is attributed
     /// to `actor` in the audit log. The transaction is committed by calling
     /// [`WriteSession::commit`] and is rolled back automatically on drop.
-    async fn begin(&self, actor: &str) -> StoreResult<Self::Session<'_>>;
+    fn begin(&self, actor: &str) -> impl Future<Output = StoreResult<Self::Session<'_>>> + Send;
 }
 
 /// A set of mutations bound to one database transaction.
