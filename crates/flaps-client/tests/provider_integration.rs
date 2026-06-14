@@ -22,6 +22,7 @@ use open_feature::EvaluationContext;
 use open_feature::provider::FeatureProvider;
 use open_feature::provider::ProviderStatus;
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use flaps_client::{FlapsProvider, FlapsProviderConfig};
@@ -114,6 +115,30 @@ async fn ruleset_handler() -> Response {
     h.insert("X-Flaps-Version", "42".parse().unwrap());
     h.insert(header::ETAG, "\"etag-v42\"".parse().unwrap());
     response
+}
+
+/// Spawns a mock server that can be stopped via a shutdown signal.
+///
+/// Returns `(addr, shutdown_tx)`. Send `()` on `shutdown_tx` to terminate the
+/// server. The returned address is guaranteed to be bound before this function
+/// returns.
+async fn spawn_stoppable_mock_server() -> (SocketAddr, oneshot::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let app = Router::new().route("/sync/v1/ruleset", get(ruleset_handler));
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_rx.await.ok();
+            })
+            .await
+            .ok();
+    });
+
+    (addr, shutdown_tx)
 }
 
 /// Spawns a mock server that honours ETag / 304 Not Modified.
@@ -436,29 +461,48 @@ async fn provider_status_stale_from_snapshot_when_threshold_set() {
 
 #[tokio::test]
 async fn ac2_server_down_eval_still_serves_last_ruleset() {
-    let addr = spawn_mock_server().await;
+    let (addr, shutdown_tx) = spawn_stoppable_mock_server().await;
     let provider = synced_provider(addr).await;
     let ctx = EvaluationContext::default();
 
     // Verify eval works while server is up.
-    let result = provider
-        .resolve_bool_value("bool-flag", &ctx)
-        .await
-        .expect("should resolve before server shutdown");
+    let result = timeout(
+        Duration::from_secs(5),
+        provider.resolve_bool_value("bool-flag", &ctx),
+    )
+    .await
+    .expect("resolve timed out before shutdown")
+    .expect("should resolve before server shutdown");
     assert!(result.value);
 
-    // The server is now implicitly unreachable (port still bound but no new
-    // requests will change the ruleset). We drop the handle but the provider
-    // keeps the last-known-good ruleset in memory.
-    //
-    // The supervisor task will fail to reconnect SSE (the server has no /events
-    // route) and its polling will fail too, but must NOT wipe the ruleset.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Kill the server: the port is now refused (not merely idle).
+    shutdown_tx.send(()).ok();
+    // Give the OS time to close the listener socket.
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let result2 = provider
-        .resolve_bool_value("bool-flag", &ctx)
-        .await
-        .expect("should still resolve after server becomes unreachable");
+    // Confirm the server is truly down: a direct HTTP request must fail.
+    let probe = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}/sync/v1/ruleset"))
+        .send()
+        .await;
+    assert!(
+        probe.is_err(),
+        "server must be unreachable after shutdown: got {:?}",
+        probe.map(|r| r.status())
+    );
+
+    // Eval must still work from the in-memory ruleset; the supervisor must
+    // NOT wipe the last-known-good ruleset on network failure.
+    let result2 = timeout(
+        Duration::from_secs(5),
+        provider.resolve_bool_value("bool-flag", &ctx),
+    )
+    .await
+    .expect("resolve timed out after server shutdown")
+    .expect("should still resolve after server becomes unreachable");
     assert!(result2.value, "last known ruleset must still be served");
 }
 

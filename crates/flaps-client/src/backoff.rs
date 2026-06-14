@@ -23,17 +23,22 @@ pub(crate) struct Backoff {
 }
 
 impl Backoff {
-    /// Creates a new [`Backoff`] with a clock-seeded xorshift64 PRNG.
+    /// Creates a new [`Backoff`] with a wall-clock-seeded xorshift64 PRNG.
     pub(crate) fn new(base: Duration, max: Duration) -> Self {
-        // Seed from monotonic nanos; non-zero is required for xorshift.
-        let seed = {
-            let nanos = std::time::Instant::now().elapsed().subsec_nanos();
-            // Use a constant fallback if nanos happens to be 0 (extremely rare).
-            if nanos == 0 {
-                6_364_136_223_846_793_005
-            } else {
-                u64::from(nanos)
-            }
+        // Seed from the wall clock (nanos since UNIX epoch) so the seed varies
+        // meaningfully across processes and time, providing effective anti-thundering-herd
+        // jitter. The xorshift64 algorithm requires a non-zero seed; the fallback
+        // constant (a non-zero hex literal) is used only if the system clock fails.
+        // The low 64 bits of epoch-nanos are sufficient entropy for a PRNG seed;
+        // truncation of u128 to u64 is intentional.
+        #[allow(clippy::cast_possible_truncation)]
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0x9E37_79B9_7F4A_7C15_u64, |d| d.as_nanos() as u64);
+        let seed = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
         };
         Self::with_jitter(base, max, xorshift_jitter(seed))
     }

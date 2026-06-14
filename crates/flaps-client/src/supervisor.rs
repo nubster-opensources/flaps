@@ -145,18 +145,7 @@ async fn open_event_stream(
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        // Convert a non-2xx into an error by materialising a response error.
-        // We return a "status" error by forcing a text decode on an error status.
-        let status = response.status();
-        warn!(%status, "SSE endpoint returned non-2xx");
-        return Err(
-            // reqwest has no public constructor for status errors; simulate by
-            // sending a second request that we know will fail, OR use a simpler
-            // approach: return a custom error via a failed `.error_for_status()`.
-            response.error_for_status().unwrap_err(),
-        );
-    }
+    let response = response.error_for_status()?;
 
     Ok(response.bytes_stream())
 }
