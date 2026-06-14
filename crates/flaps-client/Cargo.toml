@@ -20,10 +20,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
