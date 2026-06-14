@@ -9,7 +9,7 @@ use flaps_domain::{
     Environment, EnvironmentKey, Flag, FlagEnvConfig, FlagKey, ProjectKey, Segment, SegmentKey,
 };
 
-use crate::{error::ApiError, state::AppState, state::Store};
+use crate::{error::ApiError, state::AppState, state::Store, sync::SyncEvent};
 
 // ---------------------------------------------------------------------------
 // Change overlay
@@ -291,6 +291,11 @@ pub async fn validate_by_compiling<S: Store>(
 }
 
 /// Installs freshly compiled rulesets into the cache (post-commit).
+///
+/// Each ruleset is inserted into the cache first; then a [`SyncEvent`] is
+/// emitted on the broadcast channel. This ordering guarantees that any
+/// subscriber receiving the event and immediately calling
+/// `GET /sync/v1/ruleset` will observe the new version, never a stale one.
 pub async fn install_in_cache<S: Store>(
     state: &AppState<S>,
     project: &ProjectKey,
@@ -298,7 +303,15 @@ pub async fn install_in_cache<S: Store>(
 ) {
     let mut cache = state.cache.write().await;
     for ruleset in rulesets {
-        cache.insert((project.clone(), ruleset.environment.clone()), ruleset);
+        let environment = ruleset.environment.clone();
+        let version = ruleset.version;
+        cache.insert((project.clone(), environment.clone()), ruleset);
+        // Emit after insert: ordering invariant documented in `crate::sync`.
+        let _ = state.events.send(SyncEvent {
+            project: project.clone(),
+            environment,
+            version,
+        });
     }
 }
 

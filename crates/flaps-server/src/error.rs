@@ -13,6 +13,8 @@ use flaps_store::StoreError;
 pub enum ApiError {
     /// 401: missing or invalid authentication credentials.
     Unauthorized,
+    /// 403: the authenticated principal is not permitted to access this resource.
+    Forbidden,
     /// 422: request body is malformed or fails domain validation.
     InvalidBody(String),
     /// 400: the proposed change does not compile (invalid rules).
@@ -50,6 +52,13 @@ impl IntoResponse for ApiError {
                 "unauthorized",
                 "Unauthorized",
                 "Missing or invalid authentication credentials.".to_owned(),
+                None,
+            ),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Forbidden",
+                "This endpoint requires a server SDK key.".to_owned(),
                 None,
             ),
             Self::InvalidBody(msg) => (

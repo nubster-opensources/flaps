@@ -10,6 +10,7 @@ pub mod rate_limit;
 pub mod recompile;
 pub mod routes;
 pub mod state;
+pub mod sync;
 
 use axum::{
     Router,
@@ -28,6 +29,7 @@ use routes::{
     segment::{delete_segment, get_segment, list_segments, put_segment},
 };
 use state::{AppState, Store};
+use sync::{get_events, get_ruleset};
 
 /// Builds the full router over the given application state.
 ///
@@ -110,6 +112,9 @@ pub fn build_router<S: Store>(state: AppState<S>) -> Router {
             "/ofrep/v1/evaluate/flags/:key",
             post(post_evaluate_flag::<S>),
         )
+        // ---- Sync v1 (server-key only) ----
+        .route("/sync/v1/ruleset", get(get_ruleset::<S>))
+        .route("/sync/v1/events", get(get_events::<S>))
         .with_state(state)
 }
 
