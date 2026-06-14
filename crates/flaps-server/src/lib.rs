@@ -21,6 +21,7 @@ use routes::{
     environment::{delete_environment, get_environment, list_environments, put_environment},
     flag::{delete_flag, get_flag, list_flags, put_flag},
     flag_env_config::{delete_flag_env_config, get_flag_env_config, put_flag_env_config},
+    ofrep::{post_evaluate_flag, post_evaluate_flags},
     project::{delete_project, get_project, list_projects, put_project},
     sdk::get_whoami,
     sdk_key::{delete_sdk_key, list_sdk_keys, post_sdk_key},
@@ -103,6 +104,12 @@ pub fn build_router<S: Store>(state: AppState<S>) -> Router {
         )
         // ---- SDK ----
         .route("/sdk/whoami", get(get_whoami::<S>))
+        // ---- OFREP v1 evaluation ----
+        .route("/ofrep/v1/evaluate/flags", post(post_evaluate_flags::<S>))
+        .route(
+            "/ofrep/v1/evaluate/flags/:key",
+            post(post_evaluate_flag::<S>),
+        )
         .with_state(state)
 }
 
