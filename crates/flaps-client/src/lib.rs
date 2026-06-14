@@ -1,9 +1,9 @@
 //! OpenFeature in-process provider for Rust backed by Flaps.
 //!
-//! Synchronizes the compiled flagd ruleset over HTTP and evaluates flags
-//! locally through the flaps-eval engine. The provider guarantees that
-//! evaluations never panic: any transient error or missing ruleset causes the
-//! SDK to serve the caller-supplied default with reason `ERROR`.
+//! Synchronizes the compiled flagd ruleset over HTTP and SSE, evaluates flags
+//! locally through the flaps-eval engine, and survives server outages by
+//! serving the last-known-good ruleset. An optional disk snapshot enables
+//! warm-start even when the server is unreachable at startup.
 //!
 //! # Quick start
 //!
@@ -16,9 +16,14 @@
 //! // open_feature::OpenFeature::singleton().set_provider(provider).await
 //! ```
 
+mod backoff;
 mod coerce;
 mod context_mapper;
 mod reason_mapper;
+mod shared;
+mod snapshot;
+mod sse;
+mod supervisor;
 mod sync;
 
 pub mod provider;
