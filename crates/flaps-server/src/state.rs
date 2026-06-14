@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 use flaps_compiler::CompiledRuleset;
 use flaps_domain::{EnvironmentKey, ProjectKey};
@@ -15,6 +15,7 @@ use flaps_store::repository::{
 };
 
 use crate::rate_limit::RateLimiter;
+use crate::sync::SyncEvent;
 
 /// Bundles every store capability the server requires.
 ///
@@ -62,6 +63,12 @@ pub type CompiledCache = Arc<RwLock<HashMap<(ProjectKey, EnvironmentKey), Compil
 /// Default session TTL (24 hours).
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 
+/// Broadcast channel capacity for [`SyncEvent`] notifications.
+///
+/// A buffer of 256 events covers typical mutation bursts. Slower subscribers
+/// skip lagged ticks and re-sync on the next `GET /sync/v1/ruleset`.
+const EVENTS_CHANNEL_CAPACITY: usize = 256;
+
 /// Shared application state. Cheap to clone (Arc-backed).
 #[derive(Clone)]
 pub struct AppState<S: Store> {
@@ -73,6 +80,13 @@ pub struct AppState<S: Store> {
     pub rate_limiter: Arc<RateLimiter>,
     /// TTL for newly minted sessions.
     pub session_ttl: Duration,
+    /// Broadcast channel sender for ruleset change notifications.
+    ///
+    /// Emits one [`SyncEvent`] per recompiled ruleset, after it is written to
+    /// [`Self::cache`]. Subscribers call [`broadcast::Sender::subscribe`] to
+    /// receive events; a send with no active receivers silently discards the
+    /// event.
+    pub events: broadcast::Sender<SyncEvent>,
 }
 
 impl<S: Store> AppState<S> {
@@ -81,6 +95,7 @@ impl<S: Store> AppState<S> {
     /// Defaults: rate limiter enabled (60 req/min per key), session TTL 24h.
     #[must_use]
     pub fn new(store: S) -> Self {
+        let (events, _) = broadcast::channel(EVENTS_CHANNEL_CAPACITY);
         Self {
             store,
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -90,17 +105,20 @@ impl<S: Store> AppState<S> {
                 refill_per_second: 1.0,
             })),
             session_ttl: DEFAULT_SESSION_TTL,
+            events,
         }
     }
 
     /// Builds app state with explicit configuration (used in tests and binary).
     #[must_use]
     pub fn with_config(store: S, rate_limiter: Arc<RateLimiter>, session_ttl: Duration) -> Self {
+        let (events, _) = broadcast::channel(EVENTS_CHANNEL_CAPACITY);
         Self {
             store,
             cache: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter,
             session_ttl,
+            events,
         }
     }
 }

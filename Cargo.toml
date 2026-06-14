@@ -49,6 +49,7 @@ uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.7", features = ["json", "macros"] }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
