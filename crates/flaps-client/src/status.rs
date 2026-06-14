@@ -9,6 +9,12 @@ pub(crate) struct SyncState {
     pub(crate) version: Option<u64>,
     /// Monotonic instant of the last successful sync.
     pub(crate) last_successful_sync: Option<Instant>,
+    /// ETag value (quoted) received from the server, sent as `If-None-Match` on
+    /// subsequent requests.
+    pub(crate) etag: Option<String>,
+    /// `true` when the ruleset was loaded from a disk snapshot and has not yet
+    /// been confirmed by a successful network sync this session.
+    pub(crate) loaded_from_snapshot: bool,
 }
 
 /// Snapshot of provider freshness metrics.
