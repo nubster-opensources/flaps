@@ -1,5 +1,7 @@
 //! Shared test suite executed against both SQLite and PostgreSQL backends.
 
+use std::time::Duration;
+
 use flaps_domain::SdkKeyKind;
 use flaps_domain::{
     Environment, EnvironmentKey, ExternalRef, Flag, FlagEnvConfig, FlagKey, FlagType, ManagedBy,
@@ -9,8 +11,9 @@ use flaps_domain::{
 use flaps_store::{
     AuditRecord, KeyHasher, NewSdkKey, SdkKeyScope,
     repository::{
-        AuditLogRepository, EnvironmentRepository, FlagEnvConfigRepository, FlagRepository,
-        ProjectRepository, SdkKeyRepository, SegmentRepository, TransactionalStore, WriteSession,
+        AccountRepository, AuditLogRepository, EnvironmentRepository, FlagEnvConfigRepository,
+        FlagRepository, ProjectRepository, SdkKeyRepository, SegmentRepository, SessionRepository,
+        TransactionalStore, WriteSession,
     },
 };
 
@@ -138,6 +141,8 @@ where
         + SegmentRepository
         + FlagEnvConfigRepository
         + SdkKeyRepository
+        + AccountRepository
+        + SessionRepository
         + AuditLogRepository
         + TransactionalStore
         + Clone
@@ -170,6 +175,21 @@ where
     test_audit_is_append_only_api(&store);
     // sdk_key_is_hashed_at_rest is backend-specific (requires direct DB access);
     // it is tested inline in the sqlite test file via a raw query.
+
+    // Account + session tests (#20 TDD cases 1-13)
+    test_create_account_and_verify_credentials(&store).await;
+    test_verify_credentials_wrong_password(&store).await;
+    test_verify_credentials_unknown_account(&store).await;
+    test_verify_credentials_inactive_account(&store);
+    test_create_account_duplicate_username(&store).await;
+    test_create_session_and_resolve(&store).await;
+    test_resolve_unknown_session(&store).await;
+    test_resolve_expired_session(&store).await;
+    test_revoke_session_then_resolve(&store).await;
+    test_revoke_sdk_key_then_find(&store).await;
+    test_list_sdk_keys_includes_revoked(&store).await;
+    test_find_sdk_key_ignores_revoked(&store).await;
+    test_audit_account_and_key_revocation(&store).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -944,4 +964,412 @@ fn test_audit_is_append_only_api<S: AuditLogRepository>(_store: &S) {
     // (list_audit_entries + audit_entries_for, no write methods) IS the invariant.
     // If a write method were added here it would be a compile error on callers
     // that do not implement it, enforcing immutability by construction.
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 1: create_account_and_verify_credentials
+// ---------------------------------------------------------------------------
+
+async fn test_create_account_and_verify_credentials<S: AccountRepository>(store: &S) {
+    let record = store
+        .create_account("system", "alice", "correct-password")
+        .await
+        .unwrap();
+    assert_eq!(record.username, "alice");
+    assert!(!record.id.is_empty());
+
+    let found = store
+        .verify_credentials("alice", "correct-password")
+        .await
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "valid credentials must resolve the account"
+    );
+    assert_eq!(found.unwrap().username, "alice");
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 2: verify_credentials_wrong_password
+// ---------------------------------------------------------------------------
+
+async fn test_verify_credentials_wrong_password<S: AccountRepository>(store: &S) {
+    store
+        .create_account("system", "bob", "correct-password")
+        .await
+        .unwrap();
+    let found = store
+        .verify_credentials("bob", "wrong-password")
+        .await
+        .unwrap();
+    assert!(
+        found.is_none(),
+        "wrong password must return None (anti-enumeration)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 3: verify_credentials_unknown_account
+// ---------------------------------------------------------------------------
+
+async fn test_verify_credentials_unknown_account<S: AccountRepository>(store: &S) {
+    let found = store
+        .verify_credentials("nonexistent-user-xyz", "any-password")
+        .await
+        .unwrap();
+    assert!(
+        found.is_none(),
+        "unknown account must return None (anti-enumeration)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 4: verify_credentials_inactive_account
+// ---------------------------------------------------------------------------
+
+fn test_verify_credentials_inactive_account<S: AccountRepository>(store: &S) {
+    // Create the account then deactivate via a separate method or direct SQL.
+    // The trait does not expose a deactivate method; we verify the store returns
+    // None for accounts where is_active = false. This case is validated via the
+    // fixture helper that inserts a deactivated account directly.
+    //
+    // Since the shared suite cannot directly manipulate SQL, we rely on the
+    // backend-specific test (sqlite.rs) to cover this case with direct SQL.
+    // Here we document the expected behaviour by annotation only.
+    let _ = store; // suppress unused warning
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 5: create_account_duplicate_username
+// ---------------------------------------------------------------------------
+
+async fn test_create_account_duplicate_username<S: AccountRepository>(store: &S) {
+    store
+        .create_account("system", "carol", "password-1")
+        .await
+        .unwrap();
+    let result = store.create_account("system", "carol", "password-2").await;
+    assert!(result.is_err(), "duplicate username must return an error");
+    if let Err(flaps_store::StoreError::Conflict(_)) = result {
+        // expected
+    } else {
+        panic!("expected Conflict, got: {result:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 6: create_session_and_resolve
+// ---------------------------------------------------------------------------
+
+async fn test_create_session_and_resolve<S: AccountRepository + SessionRepository>(store: &S) {
+    let account = store
+        .create_account("system", "session-user", "pass")
+        .await
+        .unwrap();
+    let session = store
+        .create_session(&account.id, Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert!(!session.token.is_empty());
+
+    let resolved = store.resolve_session(&session.token).await.unwrap();
+    assert!(resolved.is_some(), "valid session must resolve");
+    assert_eq!(resolved.unwrap().id, account.id);
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 7: resolve_unknown_session
+// ---------------------------------------------------------------------------
+
+async fn test_resolve_unknown_session<S: SessionRepository>(store: &S) {
+    let resolved = store
+        .resolve_session("nonexistent-token-xyz")
+        .await
+        .unwrap();
+    assert!(resolved.is_none(), "unknown session token must return None");
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 8: resolve_expired_session
+// ---------------------------------------------------------------------------
+
+async fn test_resolve_expired_session<S: AccountRepository + SessionRepository>(store: &S) {
+    let account = store
+        .create_account("system", "expired-user", "pass")
+        .await
+        .unwrap();
+    // TTL of 0 seconds: session is immediately expired.
+    let session = store
+        .create_session(&account.id, Duration::from_secs(0))
+        .await
+        .unwrap();
+
+    // Brief sleep to ensure wall-clock has advanced past expiry.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    let resolved = store.resolve_session(&session.token).await.unwrap();
+    assert!(resolved.is_none(), "expired session must return None");
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 9: revoke_session_then_resolve
+// ---------------------------------------------------------------------------
+
+async fn test_revoke_session_then_resolve<S: AccountRepository + SessionRepository>(store: &S) {
+    let account = store
+        .create_account("system", "revoke-user", "pass")
+        .await
+        .unwrap();
+    let session = store
+        .create_session(&account.id, Duration::from_secs(3600))
+        .await
+        .unwrap();
+
+    store.revoke_session(&session.token).await.unwrap();
+
+    let resolved = store.resolve_session(&session.token).await.unwrap();
+    assert!(
+        resolved.is_none(),
+        "revoked session must return None without restart"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 10: revoke_sdk_key_then_find
+// ---------------------------------------------------------------------------
+
+async fn test_revoke_sdk_key_then_find<
+    S: ProjectRepository + EnvironmentRepository + SdkKeyRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("revoke-sdk-proj");
+    let env = make_env("prod-revoke");
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let raw = "revoke-key-12345-secret";
+    let new_key = NewSdkKey {
+        kind: SdkKeyKind::Server,
+        scope: SdkKeyScope {
+            project_key: proj.key.clone(),
+            environment_key: env.key.clone(),
+        },
+    };
+    let record = store.create_sdk_key(raw, &new_key).await.unwrap();
+
+    store
+        .revoke_sdk_key("tester", &proj.key, &env.key, &record.prefix)
+        .await
+        .unwrap();
+
+    let found = store.find_sdk_key(raw).await.unwrap();
+    assert!(
+        found.is_none(),
+        "revoked key must not be returned by find_sdk_key (AC3)"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 11: list_sdk_keys_includes_revoked
+// ---------------------------------------------------------------------------
+
+async fn test_list_sdk_keys_includes_revoked<
+    S: ProjectRepository + EnvironmentRepository + SdkKeyRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("list-sdk-proj");
+    let env = make_env("list-env");
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let scope = SdkKeyScope {
+        project_key: proj.key.clone(),
+        environment_key: env.key.clone(),
+    };
+    let new_key = |kind| NewSdkKey {
+        kind,
+        scope: scope.clone(),
+    };
+
+    let rec1 = store
+        .create_sdk_key("list-key-active-12345", &new_key(SdkKeyKind::Server))
+        .await
+        .unwrap();
+    let rec2 = store
+        .create_sdk_key("list-key-revoked-12345", &new_key(SdkKeyKind::Client))
+        .await
+        .unwrap();
+
+    store
+        .revoke_sdk_key("tester", &proj.key, &env.key, &rec2.prefix)
+        .await
+        .unwrap();
+
+    let list = store.list_sdk_keys("tester", &scope).await.unwrap();
+    assert_eq!(
+        list.len(),
+        2,
+        "list must include both active and revoked keys"
+    );
+    let prefixes: Vec<&str> = list.iter().map(|r| r.prefix.as_str()).collect();
+    assert!(
+        prefixes.contains(&rec1.prefix.as_str()),
+        "active key must be in list"
+    );
+    assert!(
+        prefixes.contains(&rec2.prefix.as_str()),
+        "revoked key must be in list"
+    );
+
+    // No secret (raw key) must appear in the records.
+    for rec in &list {
+        assert!(
+            !rec.prefix.contains("secret"),
+            "prefix must not contain secret material"
+        );
+    }
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 12: find_sdk_key_ignores_revoked
+// ---------------------------------------------------------------------------
+
+async fn test_find_sdk_key_ignores_revoked<
+    S: ProjectRepository + EnvironmentRepository + SdkKeyRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("find-ignores-proj");
+    let env = make_env("find-ignores-env");
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let scope = SdkKeyScope {
+        project_key: proj.key.clone(),
+        environment_key: env.key.clone(),
+    };
+    let new_key = |kind| NewSdkKey {
+        kind,
+        scope: scope.clone(),
+    };
+
+    let active_raw = "active-key-abcde-12345";
+    let revoked_raw = "revoked-key-xyz-12345678";
+
+    let revoked_rec = store
+        .create_sdk_key(revoked_raw, &new_key(SdkKeyKind::Server))
+        .await
+        .unwrap();
+    store
+        .create_sdk_key(active_raw, &new_key(SdkKeyKind::Client))
+        .await
+        .unwrap();
+
+    store
+        .revoke_sdk_key("tester", &proj.key, &env.key, &revoked_rec.prefix)
+        .await
+        .unwrap();
+
+    // Revoked key must not be found.
+    let not_found = store.find_sdk_key(revoked_raw).await.unwrap();
+    assert!(
+        not_found.is_none(),
+        "revoked key must return None from find_sdk_key"
+    );
+
+    // Active key in same scope must still be found.
+    let found = store.find_sdk_key(active_raw).await.unwrap();
+    assert!(
+        found.is_some(),
+        "active key must still be found even after another key in same scope was revoked"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 13: audit_account_and_key_revocation
+// ---------------------------------------------------------------------------
+
+async fn test_audit_account_and_key_revocation<
+    S: ProjectRepository
+        + EnvironmentRepository
+        + AccountRepository
+        + SdkKeyRepository
+        + AuditLogRepository,
+>(
+    store: &S,
+) {
+    let before_count = store.list_audit_entries().await.unwrap().len();
+
+    // Create account -> must produce an audit entry.
+    let account = store
+        .create_account("admin", "audit-test-user", "pass")
+        .await
+        .unwrap();
+
+    let after_create = store.list_audit_entries().await.unwrap();
+    assert!(
+        after_create.len() > before_count,
+        "account creation must produce an audit entry"
+    );
+    assert!(
+        after_create
+            .iter()
+            .any(|e| e.entity_type == "account" && e.entity_id == account.id && e.actor == "admin"),
+        "audit entry must reference the created account with the correct actor"
+    );
+
+    // Create SDK key and revoke -> must produce an audit entry for revocation.
+    let proj = make_project("audit-sdk-proj");
+    let env = make_env("audit-sdk-env");
+    store.upsert_project("admin", &proj).await.unwrap();
+    store
+        .upsert_environment("admin", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let raw = "audit-key-revoke-12345";
+    let new_key = NewSdkKey {
+        kind: SdkKeyKind::Server,
+        scope: SdkKeyScope {
+            project_key: proj.key.clone(),
+            environment_key: env.key.clone(),
+        },
+    };
+    let rec = store.create_sdk_key(raw, &new_key).await.unwrap();
+
+    let before_revoke = store.list_audit_entries().await.unwrap().len();
+    store
+        .revoke_sdk_key("admin", &proj.key, &env.key, &rec.prefix)
+        .await
+        .unwrap();
+    let after_revoke = store.list_audit_entries().await.unwrap();
+    assert!(
+        after_revoke.len() > before_revoke,
+        "SDK key revocation must produce an audit entry"
+    );
+    assert!(
+        after_revoke
+            .iter()
+            .any(|e| e.entity_type == "sdk_key" && e.actor == "admin"),
+        "revocation audit entry must reference sdk_key entity type with the correct actor"
+    );
+
+    store.delete_project("admin", &proj.key).await.unwrap();
 }

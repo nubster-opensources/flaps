@@ -9,7 +9,7 @@ use axum::{
 use flaps_domain::{EnvironmentKey, FlagEnvConfig, FlagKey, ProjectKey};
 
 use crate::{
-    actor::extract_actor,
+    auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, compute_etag},
     recompile::{Change, install_in_cache, validate_by_compiling},
@@ -44,11 +44,12 @@ pub async fn get_flag_env_config<S: Store>(
 /// `PUT /projects/{project}/flags/{flag}/environments/{env}/config` -- upsert a config.
 pub async fn put_flag_env_config<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, flag, env)): Path<(String, String, String)>,
     headers: HeaderMap,
     Json(body): Json<FlagEnvConfig>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
@@ -99,10 +100,11 @@ pub async fn put_flag_env_config<S: Store>(
 /// `DELETE /projects/{project}/flags/{flag}/environments/{env}/config` -- delete a config.
 pub async fn delete_flag_env_config<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, flag, env)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;

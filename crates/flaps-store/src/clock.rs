@@ -23,6 +23,10 @@ pub(crate) fn now_rfc3339() -> String {
 /// Converts a count of days since the Unix epoch to a `(year, month, day)` triple.
 ///
 /// Uses the algorithm by Howard Hinnant (public domain).
+pub(crate) fn days_to_ymd_pub(days: u64) -> (u64, u64, u64) {
+    days_to_ymd(days)
+}
+
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
     let era = z / 146_097;

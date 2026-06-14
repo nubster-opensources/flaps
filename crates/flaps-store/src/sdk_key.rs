@@ -1,9 +1,10 @@
 //! Persisted, secret-free forms of SDK keys.
 
 use flaps_domain::{EnvironmentKey, ProjectKey, SdkKeyKind};
+use serde::Serialize;
 
 /// Project and environment scope an SDK key is bound to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SdkKeyScope {
     /// The project this key belongs to.
     pub project_key: ProjectKey,
@@ -27,7 +28,7 @@ pub struct NewSdkKey {
 ///
 /// Never carries the raw value nor the HMAC hash; exposes only the readable
 /// prefix so callers can identify a key without being able to reuse it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SdkKeyRecord {
     /// The leading readable characters of the original raw key.
     pub prefix: String,

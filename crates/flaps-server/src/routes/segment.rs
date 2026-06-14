@@ -9,7 +9,7 @@ use axum::{
 use flaps_domain::{ProjectKey, Segment, SegmentKey};
 
 use crate::{
-    actor::extract_actor,
+    auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, compute_etag},
     recompile::{Change, install_in_cache, validate_by_compiling},
@@ -57,11 +57,12 @@ pub async fn get_segment<S: Store>(
 /// `PUT /projects/{project}/segments/{segment}` -- upsert a segment.
 pub async fn put_segment<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, segment)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<Segment>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let segment_key = SegmentKey::new(segment).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
@@ -116,10 +117,11 @@ pub async fn put_segment<S: Store>(
 /// will fail with `UnknownSegment` and the deletion will be refused (400).
 pub async fn delete_segment<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, segment)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let segment_key = SegmentKey::new(segment).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 

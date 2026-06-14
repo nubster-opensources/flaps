@@ -2,6 +2,7 @@
 //!
 //! Re-exports all traits for convenient use by store consumers.
 
+pub mod account;
 pub mod audit_log;
 pub mod environment;
 pub mod flag;
@@ -11,6 +12,7 @@ pub mod sdk_key;
 pub mod segment;
 pub mod transaction;
 
+pub use account::{AccountRepository, SessionRepository};
 pub use audit_log::AuditLogRepository;
 pub use environment::EnvironmentRepository;
 pub use flag::FlagRepository;
