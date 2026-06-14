@@ -25,4 +25,4 @@ pub mod provider;
 pub mod status;
 
 pub use provider::{FlapsProvider, FlapsProviderConfig};
-pub use status::ProviderStatus;
+pub use status::SyncStatus;

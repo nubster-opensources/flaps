@@ -94,12 +94,12 @@ impl FlapsProvider {
 
     /// Returns a snapshot of provider freshness metrics.
     #[must_use]
-    pub fn status(&self) -> crate::ProviderStatus {
+    pub fn status(&self) -> crate::SyncStatus {
         let state = self
             .sync_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::status::ProviderStatus::from_state(&state)
+        crate::status::SyncStatus::from_state(&state)
     }
 
     /// Evaluates a flag from the current ruleset.

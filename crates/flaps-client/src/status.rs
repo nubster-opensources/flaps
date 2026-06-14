@@ -17,7 +17,7 @@ pub(crate) struct SyncState {
 /// [`SyncState`] at call time. All fields are `None` until the first
 /// successful sync completes.
 #[derive(Debug, Clone)]
-pub struct ProviderStatus {
+pub struct SyncStatus {
     /// Version of the currently loaded ruleset, if known.
     pub version: Option<u64>,
     /// Monotonic instant of the last successful ruleset sync.
@@ -26,8 +26,8 @@ pub struct ProviderStatus {
     pub ruleset_age: Option<Duration>,
 }
 
-impl ProviderStatus {
-    /// Creates a [`ProviderStatus`] from the current [`SyncState`].
+impl SyncStatus {
+    /// Creates a [`SyncStatus`] from the current [`SyncState`].
     #[must_use]
     pub(crate) fn from_state(state: &SyncState) -> Self {
         let last_successful_sync = state.last_successful_sync;
