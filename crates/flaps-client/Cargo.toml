@@ -12,6 +12,18 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+flaps-eval = { workspace = true }
+open-feature = { workspace = true }
+reqwest = { workspace = true }
+arc-swap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
