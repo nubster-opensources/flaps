@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 flaps-domain = { workspace = true }
+flaps-eval = { workspace = true }
 flaps-store = { workspace = true }
 flaps-compiler = { workspace = true }
 axum = { workspace = true }
@@ -29,6 +30,8 @@ argon2 = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 http-body-util = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [lints]
 workspace = true
