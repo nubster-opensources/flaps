@@ -1,6 +1,7 @@
 //! Integration tests for the admin REST API.
 //!
 //! Uses axum's `oneshot` (no real network socket) with a `SqliteStore::in_memory` backend.
+//! All mutation routes require a valid session token; helpers call `POST /login` first.
 
 use axum::{
     body::Body,
@@ -11,7 +12,7 @@ use flaps_domain::{
     Predicate, Project, ProjectKey, Segment, SegmentKey, SegmentMatch, ServeTarget, TargetingRule,
     ValueType, VariantKey, VariantValue, Variants,
 };
-use flaps_server::{build_router, state::AppState};
+use flaps_server::{bootstrap_admin, build_router, state::AppState};
 use flaps_store::{
     hash::KeyHasher,
     repository::{AuditLogRepository, FlagEnvConfigRepository},
@@ -24,6 +25,9 @@ use tower::ServiceExt;
 // Test helpers
 // ---------------------------------------------------------------------------
 
+const ADMIN_USER: &str = "test-admin";
+const ADMIN_PASS: &str = "test-admin-password";
+
 async fn make_store() -> SqliteStore {
     let hasher = KeyHasher::new(b"00000000000000000000000000000000".to_vec());
     SqliteStore::in_memory(hasher)
@@ -31,10 +35,33 @@ async fn make_store() -> SqliteStore {
         .expect("in-memory store")
 }
 
-async fn make_app() -> axum::Router {
+/// Creates an app and a valid admin session token for use in authed requests.
+async fn make_authed_app() -> (axum::Router, String) {
     let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .expect("bootstrap admin");
     let state = AppState::new(store);
-    build_router(state)
+    let app = build_router(state);
+
+    // Login to get a session token.
+    let login_body = serde_json::json!({
+        "username": ADMIN_USER,
+        "password": ADMIN_PASS,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "login must succeed");
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let token = json["token"].as_str().unwrap().to_owned();
+
+    (app, token)
 }
 
 fn project_key(s: &str) -> ProjectKey {
@@ -119,54 +146,60 @@ async fn body_json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
-fn put_project_req(key: &str, project: &Project) -> Request<Body> {
+fn put_project_req(key: &str, project: &Project, token: &str) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!("/projects/{key}"))
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(project).unwrap()))
         .unwrap()
 }
 
-fn put_env_req(proj: &str, env: &str, body: &Environment) -> Request<Body> {
+fn put_env_req(proj: &str, env: &str, body: &Environment, token: &str) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!("/projects/{proj}/environments/{env}"))
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap()
 }
 
-fn put_flag_req(proj: &str, flag: &str, body: &Flag) -> Request<Body> {
+fn put_flag_req(proj: &str, flag: &str, body: &Flag, token: &str) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!("/projects/{proj}/flags/{flag}"))
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap()
 }
 
-fn put_segment_req(proj: &str, seg: &str, body: &Segment) -> Request<Body> {
+fn put_segment_req(proj: &str, seg: &str, body: &Segment, token: &str) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!("/projects/{proj}/segments/{seg}"))
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap()
 }
 
-fn put_config_req(proj: &str, flag: &str, env: &str, body: &FlagEnvConfig) -> Request<Body> {
+fn put_config_req(
+    proj: &str,
+    flag: &str,
+    env: &str,
+    body: &FlagEnvConfig,
+    token: &str,
+) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(format!(
             "/projects/{proj}/flags/{flag}/environments/{env}/config"
         ))
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap()
 }
@@ -179,11 +212,11 @@ fn get_req(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn delete_req(uri: &str) -> Request<Body> {
+fn delete_req(uri: &str, token: &str) -> Request<Body> {
     Request::builder()
         .method("DELETE")
         .uri(uri)
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap()
 }
@@ -202,13 +235,13 @@ fn extract_etag(response: &axum::response::Response) -> Option<String> {
 
 #[tokio::test]
 async fn project_crud_round_trip() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let project = bool_project("my-project");
 
     // PUT (create)
     let resp = app
         .clone()
-        .oneshot(put_project_req("my-project", &project))
+        .oneshot(put_project_req("my-project", &project, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -231,7 +264,7 @@ async fn project_crud_round_trip() {
     // DELETE
     let resp = app
         .clone()
-        .oneshot(delete_req("/projects/my-project"))
+        .oneshot(delete_req("/projects/my-project", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -251,13 +284,13 @@ async fn project_crud_round_trip() {
 
 #[tokio::test]
 async fn put_is_upsert() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let mut project = bool_project("upsert-project");
 
     // First PUT -> 201
     let resp = app
         .clone()
-        .oneshot(put_project_req("upsert-project", &project))
+        .oneshot(put_project_req("upsert-project", &project, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -266,7 +299,7 @@ async fn put_is_upsert() {
     project.name = "Updated Name".into();
     let resp = app
         .clone()
-        .oneshot(put_project_req("upsert-project", &project))
+        .oneshot(put_project_req("upsert-project", &project, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -287,11 +320,11 @@ async fn put_is_upsert() {
 
 #[tokio::test]
 async fn path_key_mismatch_returns_422() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     // Body has key "other-project" but path is "my-project"
     let project = bool_project("other-project");
     let resp = app
-        .oneshot(put_project_req("my-project", &project))
+        .oneshot(put_project_req("my-project", &project, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -303,11 +336,11 @@ async fn path_key_mismatch_returns_422() {
 
 #[tokio::test]
 async fn get_returns_etag_header() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let project = bool_project("etag-project");
 
     app.clone()
-        .oneshot(put_project_req("etag-project", &project))
+        .oneshot(put_project_req("etag-project", &project, &token))
         .await
         .unwrap();
 
@@ -336,12 +369,12 @@ async fn get_returns_etag_header() {
 
 #[tokio::test]
 async fn stale_if_match_returns_412() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let project = bool_project("stale-project");
 
     // PUT (create)
     app.clone()
-        .oneshot(put_project_req("stale-project", &project))
+        .oneshot(put_project_req("stale-project", &project, &token))
         .await
         .unwrap();
 
@@ -358,7 +391,7 @@ async fn stale_if_match_returns_412() {
     let mut updated = project.clone();
     updated.name = "Stale Modified".into();
     app.clone()
-        .oneshot(put_project_req("stale-project", &updated))
+        .oneshot(put_project_req("stale-project", &updated, &token))
         .await
         .unwrap();
 
@@ -367,7 +400,7 @@ async fn stale_if_match_returns_412() {
         .method("PUT")
         .uri("/projects/stale-project")
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .header(header::IF_MATCH, etag1)
         .body(Body::from(serde_json::to_vec(&updated).unwrap()))
         .unwrap();
@@ -381,11 +414,11 @@ async fn stale_if_match_returns_412() {
 
 #[tokio::test]
 async fn matching_if_match_succeeds() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let project = bool_project("match-project");
 
     app.clone()
-        .oneshot(put_project_req("match-project", &project))
+        .oneshot(put_project_req("match-project", &project, &token))
         .await
         .unwrap();
 
@@ -404,7 +437,7 @@ async fn matching_if_match_succeeds() {
         .method("PUT")
         .uri("/projects/match-project")
         .header("Content-Type", "application/json")
-        .header("X-Flaps-Actor", "test-actor")
+        .header("Authorization", format!("Bearer {token}"))
         .header(header::IF_MATCH, current_etag)
         .body(Body::from(serde_json::to_vec(&updated).unwrap()))
         .unwrap();
@@ -418,22 +451,22 @@ async fn matching_if_match_succeeds() {
 
 #[tokio::test]
 async fn invalid_rule_rejected_and_not_persisted() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let project = bool_project("invalid-project");
     let env = bool_environment("prod");
     let flag = bool_flag("my-flag");
 
     // Setup: project + env + flag
     app.clone()
-        .oneshot(put_project_req("invalid-project", &project))
+        .oneshot(put_project_req("invalid-project", &project, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_env_req("invalid-project", "prod", &env))
+        .oneshot(put_env_req("invalid-project", "prod", &env, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_flag_req("invalid-project", "my-flag", &flag))
+        .oneshot(put_flag_req("invalid-project", "my-flag", &flag, &token))
         .await
         .unwrap();
 
@@ -453,6 +486,7 @@ async fn invalid_rule_rejected_and_not_persisted() {
             "my-flag",
             "prod",
             &bad_config,
+            &token,
         ))
         .await
         .unwrap();
@@ -495,8 +529,31 @@ async fn invalid_rule_rejected_and_not_persisted() {
 #[tokio::test]
 async fn valid_mutation_persists_and_audits() {
     let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
     let state = AppState::new(store.clone());
     let app = build_router(state);
+
+    // Login
+    let login_body = serde_json::json!({ "username": ADMIN_USER, "password": ADMIN_PASS });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let token = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let project = bool_project("audit-project");
     let env = bool_environment("prod");
@@ -504,15 +561,15 @@ async fn valid_mutation_persists_and_audits() {
     let config = simple_config("on");
 
     app.clone()
-        .oneshot(put_project_req("audit-project", &project))
+        .oneshot(put_project_req("audit-project", &project, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_env_req("audit-project", "prod", &env))
+        .oneshot(put_env_req("audit-project", "prod", &env, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_flag_req("audit-project", "audited-flag", &flag))
+        .oneshot(put_flag_req("audit-project", "audited-flag", &flag, &token))
         .await
         .unwrap();
 
@@ -523,6 +580,7 @@ async fn valid_mutation_persists_and_audits() {
             "audited-flag",
             "prod",
             &config,
+            &token,
         ))
         .await
         .unwrap();
@@ -539,13 +597,13 @@ async fn valid_mutation_persists_and_audits() {
         .unwrap();
     assert!(stored.is_some(), "config must be persisted in store");
 
-    // Verify an audit entry exists
+    // Verify an audit entry exists for a mutation performed by the admin user.
     let entries = store.list_audit_entries().await.unwrap();
     assert!(
         entries
             .iter()
-            .any(|e| e.actor == "test-actor" && e.action.contains("created")),
-        "must have at least one audit entry with actor=test-actor"
+            .any(|e| e.actor == ADMIN_USER && e.action.contains("created")),
+        "must have at least one audit entry with actor={ADMIN_USER}"
     );
 }
 
@@ -556,9 +614,32 @@ async fn valid_mutation_persists_and_audits() {
 #[tokio::test]
 async fn mutation_refreshes_compiled_cache() {
     let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
     let state = AppState::new(store);
     let cache = state.cache.clone();
     let app = build_router(state);
+
+    // Login
+    let login_body = serde_json::json!({ "username": ADMIN_USER, "password": ADMIN_PASS });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let token = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let project = bool_project("cache-project");
     let env = bool_environment("prod");
@@ -568,15 +649,15 @@ async fn mutation_refreshes_compiled_cache() {
     config_v2.enabled = false;
 
     app.clone()
-        .oneshot(put_project_req("cache-project", &project))
+        .oneshot(put_project_req("cache-project", &project, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_env_req("cache-project", "prod", &env))
+        .oneshot(put_env_req("cache-project", "prod", &env, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_flag_req("cache-project", "cache-flag", &flag))
+        .oneshot(put_flag_req("cache-project", "cache-flag", &flag, &token))
         .await
         .unwrap();
 
@@ -587,6 +668,7 @@ async fn mutation_refreshes_compiled_cache() {
             "cache-flag",
             "prod",
             &config_v1,
+            &token,
         ))
         .await
         .unwrap();
@@ -608,6 +690,7 @@ async fn mutation_refreshes_compiled_cache() {
             "cache-flag",
             "prod",
             &config_v2,
+            &token,
         ))
         .await
         .unwrap();
@@ -630,11 +713,35 @@ async fn mutation_refreshes_compiled_cache() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn segment_change_recompiles_referencing_envs() {
     let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
     let state = AppState::new(store);
     let cache = state.cache.clone();
     let app = build_router(state);
+
+    // Login
+    let login_body = serde_json::json!({ "username": ADMIN_USER, "password": ADMIN_PASS });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let token = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let project = bool_project("seg-project");
     let env1 = bool_environment("env1");
@@ -643,23 +750,23 @@ async fn segment_change_recompiles_referencing_envs() {
     let seg = simple_segment("my-segment");
 
     app.clone()
-        .oneshot(put_project_req("seg-project", &project))
+        .oneshot(put_project_req("seg-project", &project, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_env_req("seg-project", "env1", &env1))
+        .oneshot(put_env_req("seg-project", "env1", &env1, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_env_req("seg-project", "env2", &env2))
+        .oneshot(put_env_req("seg-project", "env2", &env2, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_flag_req("seg-project", "seg-flag", &flag))
+        .oneshot(put_flag_req("seg-project", "seg-flag", &flag, &token))
         .await
         .unwrap();
     app.clone()
-        .oneshot(put_segment_req("seg-project", "my-segment", &seg))
+        .oneshot(put_segment_req("seg-project", "my-segment", &seg, &token))
         .await
         .unwrap();
 
@@ -679,6 +786,7 @@ async fn segment_change_recompiles_referencing_envs() {
             "seg-flag",
             "env1",
             &seg_config,
+            &token,
         ))
         .await
         .unwrap();
@@ -688,6 +796,7 @@ async fn segment_change_recompiles_referencing_envs() {
             "seg-flag",
             "env2",
             &seg_config,
+            &token,
         ))
         .await
         .unwrap();
@@ -710,7 +819,12 @@ async fn segment_change_recompiles_referencing_envs() {
     let mut seg_updated = seg.clone();
     seg_updated.name = "updated-segment".into();
     app.clone()
-        .oneshot(put_segment_req("seg-project", "my-segment", &seg_updated))
+        .oneshot(put_segment_req(
+            "seg-project",
+            "my-segment",
+            &seg_updated,
+            &token,
+        ))
         .await
         .unwrap();
 
@@ -725,8 +839,6 @@ async fn segment_change_recompiles_referencing_envs() {
             c.contains_key(&(project_key("seg-project"), env_key("env2"))),
             "env2 must be in cache"
         );
-        // Hashes should be the same as the segment name change doesn't affect compiled output
-        // but the cache entries must still be present and valid.
         let h1_after = c
             .get(&(project_key("seg-project"), env_key("env1")))
             .map(|r| r.content_hash.clone())
@@ -735,8 +847,6 @@ async fn segment_change_recompiles_referencing_envs() {
             .get(&(project_key("seg-project"), env_key("env2")))
             .map(|r| r.content_hash.clone())
             .unwrap_or_default();
-        // Hashes may or may not change (segment name not in compiled output); what matters
-        // is that both envs were recompiled (present in cache).
         assert!(!h1_after.is_empty(), "env1 hash must not be empty");
         assert!(!h2_after.is_empty(), "env2 hash must not be empty");
         let _ = (hash1_before, hash2_before); // suppress unused warnings
@@ -744,23 +854,23 @@ async fn segment_change_recompiles_referencing_envs() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 11: missing_actor_header_returns_422
+// Test 11: missing_auth_returns_401
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn missing_actor_header_returns_422() {
-    let app = make_app().await;
-    let project = bool_project("no-actor-project");
+async fn missing_auth_returns_401() {
+    let (app, _token) = make_authed_app().await;
+    let project = bool_project("no-auth-project");
 
-    // PUT without X-Flaps-Actor
+    // PUT without Authorization header
     let req = Request::builder()
         .method("PUT")
-        .uri("/projects/no-actor-project")
+        .uri("/projects/no-auth-project")
         .header("Content-Type", "application/json")
         .body(Body::from(serde_json::to_vec(&project).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ---------------------------------------------------------------------------
@@ -769,12 +879,12 @@ async fn missing_actor_header_returns_422() {
 
 #[tokio::test]
 async fn federated_resource_mutation_warns() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
     let mut project = bool_project("fed-project");
     project.managed_by = ManagedBy::Federated;
 
     let resp = app
-        .oneshot(put_project_req("fed-project", &project))
+        .oneshot(put_project_req("fed-project", &project, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -791,7 +901,7 @@ async fn federated_resource_mutation_warns() {
 #[tokio::test]
 async fn external_ref_conflict_returns_409() {
     use flaps_domain::ExternalRef;
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
 
     let mut project_a = bool_project("proj-a");
     project_a.external_ref = Some(ExternalRef::new("urn:shared:ref"));
@@ -802,7 +912,7 @@ async fn external_ref_conflict_returns_409() {
     // First project -> 201
     let resp = app
         .clone()
-        .oneshot(put_project_req("proj-a", &project_a))
+        .oneshot(put_project_req("proj-a", &project_a, &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -810,7 +920,7 @@ async fn external_ref_conflict_returns_409() {
     // Second project with same external_ref -> 409
     let resp = app
         .clone()
-        .oneshot(put_project_req("proj-b", &project_b))
+        .oneshot(put_project_req("proj-b", &project_b, &token))
         .await
         .unwrap();
     assert_eq!(
@@ -826,11 +936,281 @@ async fn external_ref_conflict_returns_409() {
 
 #[tokio::test]
 async fn delete_absent_returns_404() {
-    let app = make_app().await;
+    let (app, token) = make_authed_app().await;
 
     let resp = app
-        .oneshot(delete_req("/projects/nonexistent-project"))
+        .oneshot(delete_req("/projects/nonexistent-project", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: login_succeeds_with_valid_credentials
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn login_succeeds_with_valid_credentials() {
+    let (app, token) = make_authed_app().await;
+    // token was obtained in make_authed_app; verify it is non-empty.
+    assert!(!token.is_empty(), "login must return a non-empty token");
+
+    // Use it to verify it works on a read-only route (no auth needed but verify 200).
+    let resp = app.oneshot(get_req("/projects")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: login_fails_with_wrong_password
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn login_fails_with_wrong_password() {
+    let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
+    let state = AppState::new(store);
+    let app = build_router(state);
+
+    let login_body = serde_json::json!({
+        "username": ADMIN_USER,
+        "password": "wrong-password",
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Test 17: invalid_token_returns_401
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invalid_token_returns_401() {
+    let (app, _token) = make_authed_app().await;
+    let project = bool_project("auth-project");
+
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/projects/auth-project")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer invalid-token-xyz")
+        .body(Body::from(serde_json::to_vec(&project).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: sdk_key_crud_and_revocation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sdk_key_crud_and_revocation() {
+    let (app, token) = make_authed_app().await;
+    let project = bool_project("sdk-proj");
+    let env = bool_environment("prod");
+
+    app.clone()
+        .oneshot(put_project_req("sdk-proj", &project, &token))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_env_req("sdk-proj", "prod", &env, &token))
+        .await
+        .unwrap();
+
+    // POST key -> 201
+    let create_body = serde_json::json!({ "kind": "server" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/projects/sdk-proj/environments/prod/keys")
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["secret"].as_str().is_some(), "secret must be returned");
+    let prefix = json["record"]["prefix"].as_str().unwrap().to_owned();
+
+    // LIST -> 1 key
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/projects/sdk-proj/environments/prod/keys")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    // DELETE (revoke)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/projects/sdk-proj/environments/prod/keys/{prefix}"
+                ))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // LIST still shows the key (revoked but listed)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/projects/sdk-proj/environments/prod/keys")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        list.as_array().unwrap().len(),
+        1,
+        "revoked key must still appear in list"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: whoami_with_valid_sdk_key
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn whoami_with_valid_sdk_key() {
+    let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
+    let state = AppState::new(store);
+    let app = build_router(state);
+
+    // Login as admin.
+    let login_body = serde_json::json!({ "username": ADMIN_USER, "password": ADMIN_PASS });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let admin_token = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Create project + env + SDK key.
+    let project = bool_project("whoami-proj");
+    let env = bool_environment("whoami-env");
+    app.clone()
+        .oneshot(put_project_req("whoami-proj", &project, &admin_token))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_env_req("whoami-proj", "whoami-env", &env, &admin_token))
+        .await
+        .unwrap();
+
+    let create_body = serde_json::json!({ "kind": "client" });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/projects/whoami-proj/environments/whoami-env/keys")
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let sdk_secret = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["secret"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // GET /sdk/whoami with the SDK key.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/sdk/whoami")
+                .header("Authorization", format!("Bearer {sdk_secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["kind"].as_str(), Some("client"));
+    assert_eq!(json["scope"]["project_key"].as_str(), Some("whoami-proj"));
+    assert_eq!(
+        json["scope"]["environment_key"].as_str(),
+        Some("whoami-env")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 20: whoami_without_sdk_key_returns_401
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn whoami_without_sdk_key_returns_401() {
+    let (app, _token) = make_authed_app().await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/sdk/whoami")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

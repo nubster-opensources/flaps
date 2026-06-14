@@ -1,5 +1,8 @@
 //! PostgreSQL backend: pool construction, migrations and repository implementations.
 
+use std::time::Duration;
+
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use sqlx::{
     Executor, Pool, Postgres, Transaction,
     migrate::{Migration, MigrationType, Migrator},
@@ -11,10 +14,12 @@ use flaps_domain::{
 };
 
 use crate::{
+    account::{AccountRecord, NewSession},
     audit::{AuditRecord, postgres::append_audit},
     error::{StoreError, StoreResult},
     hash::KeyHasher,
     repository::{
+        account::{AccountRepository, SessionRepository},
         audit_log::AuditLogRepository,
         environment::EnvironmentRepository,
         flag::FlagRepository,
@@ -26,6 +31,53 @@ use crate::{
     },
     sdk_key::{NewSdkKey, SdkKeyRecord, SdkKeyScope},
 };
+
+// ---------------------------------------------------------------------------
+// Crypto helpers (argon2id + token generation) - mirrored from sqlite backend
+// ---------------------------------------------------------------------------
+
+fn hash_password(password: &str) -> StoreResult<String> {
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| {
+            StoreError::Serialization(
+                serde_json::from_str::<serde_json::Value>(&format!("\"argon2 error: {e}\""))
+                    .unwrap_err(),
+            )
+        })
+}
+
+fn verify_password(password: &str, hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+fn generate_token() -> String {
+    use argon2::password_hash::rand_core::RngCore;
+    let mut bytes = [0u8; 32];
+    argon2::password_hash::rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+fn secs_to_rfc3339(secs: u64) -> String {
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3_600) % 24;
+    let days = secs / 86_400;
+    let (year, month, day) = crate::clock::days_to_ymd_pub(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
 
 // ---------------------------------------------------------------------------
 // Type aliases for query row tuples (avoids type_complexity lint)
@@ -428,6 +480,22 @@ fn embedded_migrator() -> Migrator {
                 Cow::Borrowed("audit_log"),
                 MigrationType::Simple,
                 Cow::Borrowed(include_str!("../../migrations/postgres/0002_audit_log.sql")),
+                false,
+            ),
+            Migration::new(
+                3,
+                Cow::Borrowed("accounts"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!("../../migrations/postgres/0003_accounts.sql")),
+                false,
+            ),
+            Migration::new(
+                4,
+                Cow::Borrowed("sdk_key_revocation"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!(
+                    "../../migrations/postgres/0004_sdk_key_revocation.sql"
+                )),
                 false,
             ),
         ]
@@ -955,14 +1023,15 @@ impl SdkKeyRepository for PostgresStore {
     async fn find_sdk_key(&self, raw_key: &str) -> StoreResult<Option<SdkKeyRecord>> {
         let key_hash = self.hasher.hash(raw_key);
 
-        let row: Option<(String, String, String, String)> = sqlx::query_as(
-            "SELECT prefix, kind, project_key, environment_key FROM sdk_keys WHERE key_hash = $1",
+        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT prefix, kind, project_key, environment_key, created_at \
+             FROM sdk_keys WHERE key_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&key_hash)
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(|(prefix, kind_str, proj_key, env_key)| {
+        row.map(|(prefix, kind_str, proj_key, env_key, created_at)| {
             let kind = serde_json::from_str(&format!(r#""{kind_str}""#))?;
             Ok(SdkKeyRecord {
                 prefix,
@@ -972,10 +1041,230 @@ impl SdkKeyRepository for PostgresStore {
                     environment_key: EnvironmentKey::new(env_key)
                         .map_err(|e| domain_key_err(&e))?,
                 },
-                created_at: String::new(),
+                created_at,
             })
         })
         .transpose()
+    }
+
+    async fn list_sdk_keys(
+        &self,
+        _actor: &str,
+        scope: &SdkKeyScope,
+    ) -> StoreResult<Vec<SdkKeyRecord>> {
+        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT prefix, kind, project_key, environment_key, created_at \
+             FROM sdk_keys \
+             WHERE project_key = $1 AND environment_key = $2 \
+             ORDER BY created_at ASC",
+        )
+        .bind(scope.project_key.as_str())
+        .bind(scope.environment_key.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(prefix, kind_str, proj_key, env_key, created_at)| {
+                let kind = serde_json::from_str(&format!(r#""{kind_str}""#))?;
+                Ok(SdkKeyRecord {
+                    prefix,
+                    kind,
+                    scope: SdkKeyScope {
+                        project_key: ProjectKey::new(proj_key).map_err(|e| domain_key_err(&e))?,
+                        environment_key: EnvironmentKey::new(env_key)
+                            .map_err(|e| domain_key_err(&e))?,
+                    },
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
+    async fn revoke_sdk_key(
+        &self,
+        actor: &str,
+        project: &ProjectKey,
+        environment: &EnvironmentKey,
+        prefix: &str,
+    ) -> StoreResult<()> {
+        let now = crate::clock::now_rfc3339();
+        sqlx::query(
+            "UPDATE sdk_keys SET revoked_at = $1 \
+             WHERE project_key = $2 AND environment_key = $3 AND prefix = $4 AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(project.as_str())
+        .bind(environment.as_str())
+        .bind(prefix)
+        .execute(&self.pool)
+        .await?;
+
+        let entity_id = format!("{}/{}/{}", project.as_str(), environment.as_str(), prefix);
+        let record = AuditRecord {
+            actor: actor.to_owned(),
+            action: "sdk_key.revoked".to_owned(),
+            entity_type: "sdk_key".to_owned(),
+            entity_id,
+            before: None,
+            after: None,
+            occurred_at: now,
+        };
+        append_audit(&self.pool, &record).await?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AccountRepository for PostgresStore
+// ---------------------------------------------------------------------------
+
+impl AccountRepository for PostgresStore {
+    async fn create_account(
+        &self,
+        actor: &str,
+        username: &str,
+        password: &str,
+    ) -> StoreResult<AccountRecord> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let password_hash = hash_password(password)?;
+        let now = crate::clock::now_rfc3339();
+
+        let result = sqlx::query(
+            r"INSERT INTO accounts (id, username, password_hash, is_active, created_at)
+              VALUES ($1, $2, $3, true, $4)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind(&password_hash)
+        .bind(&now)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                return Err(StoreError::Conflict(format!(
+                    "username already taken: {username}"
+                )));
+            }
+            Err(e) => return Err(StoreError::Sqlx(e)),
+        }
+
+        let record = AccountRecord {
+            id: id.clone(),
+            username: username.to_owned(),
+        };
+
+        let audit = AuditRecord {
+            actor: actor.to_owned(),
+            action: "account.created".to_owned(),
+            entity_type: "account".to_owned(),
+            entity_id: id,
+            before: None,
+            after: None,
+            occurred_at: now,
+        };
+        append_audit(&self.pool, &audit).await?;
+
+        Ok(record)
+    }
+
+    async fn verify_credentials(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> StoreResult<Option<AccountRecord>> {
+        let row: Option<(String, String, String, bool)> = sqlx::query_as(
+            "SELECT id, username, password_hash, is_active FROM accounts WHERE username = $1",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some((id, uname, hash, is_active)) = row else {
+            return Ok(None);
+        };
+
+        if !is_active {
+            return Ok(None);
+        }
+
+        if verify_password(password, &hash) {
+            Ok(Some(AccountRecord {
+                id,
+                username: uname,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SessionRepository for PostgresStore
+// ---------------------------------------------------------------------------
+
+impl SessionRepository for PostgresStore {
+    async fn create_session(&self, account_id: &str, ttl: Duration) -> StoreResult<NewSession> {
+        let raw_token = generate_token();
+        let token_hash = self.hasher.hash(&raw_token);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let expires_secs = now_secs.saturating_add(ttl.as_secs());
+        let expires_at = secs_to_rfc3339(expires_secs);
+
+        sqlx::query(
+            r"INSERT INTO sessions (token_hash, account_id, expires_at)
+              VALUES ($1, $2, $3)",
+        )
+        .bind(&token_hash)
+        .bind(account_id)
+        .bind(&expires_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(NewSession {
+            token: raw_token,
+            expires_at,
+        })
+    }
+
+    async fn resolve_session(&self, raw_token: &str) -> StoreResult<Option<AccountRecord>> {
+        let token_hash = self.hasher.hash(raw_token);
+        let now = crate::clock::now_rfc3339();
+
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT a.id, a.username \
+             FROM sessions s \
+             JOIN accounts a ON a.id = s.account_id \
+             WHERE s.token_hash = $1 \
+               AND s.revoked_at IS NULL \
+               AND s.expires_at > $2 \
+               AND a.is_active = true",
+        )
+        .bind(&token_hash)
+        .bind(&now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(id, username)| AccountRecord { id, username }))
+    }
+
+    async fn revoke_session(&self, raw_token: &str) -> StoreResult<()> {
+        let token_hash = self.hasher.hash(raw_token);
+        let now = crate::clock::now_rfc3339();
+
+        sqlx::query(
+            "UPDATE sessions SET revoked_at = $1 WHERE token_hash = $2 AND revoked_at IS NULL",
+        )
+        .bind(&now)
+        .bind(&token_hash)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 }
 

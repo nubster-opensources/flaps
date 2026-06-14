@@ -9,7 +9,7 @@ use axum::{
 use flaps_domain::{Environment, EnvironmentKey, ManagedBy, ProjectKey};
 
 use crate::{
-    actor::extract_actor,
+    auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, compute_etag},
     recompile::{Change, evict_environment_from_cache, install_in_cache, validate_by_compiling},
@@ -57,11 +57,12 @@ pub async fn get_environment<S: Store>(
 /// `PUT /projects/{project}/environments/{env}` -- upsert an environment.
 pub async fn put_environment<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, env)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<Environment>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
@@ -122,10 +123,11 @@ pub async fn put_environment<S: Store>(
 /// `DELETE /projects/{project}/environments/{env}` -- delete an environment.
 pub async fn delete_environment<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path((project, env)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 

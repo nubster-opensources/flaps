@@ -2,7 +2,7 @@
 //!
 //! This crate persists the **editable source model** defined by `flaps-domain`:
 //! projects, environments, feature flags, segments, per-environment flag
-//! configurations, and SDK keys.
+//! configurations, SDK keys, and local admin accounts.
 //!
 //! # Backends
 //!
@@ -28,6 +28,7 @@
 
 mod clock;
 
+pub mod account;
 pub mod audit;
 pub mod error;
 pub mod hash;
@@ -36,6 +37,7 @@ pub mod repository;
 pub mod sdk_key;
 pub mod sqlite;
 
+pub use account::{AccountRecord, NewSession};
 pub use audit::AuditRecord;
 pub use error::{StoreError, StoreResult};
 pub use hash::KeyHasher;

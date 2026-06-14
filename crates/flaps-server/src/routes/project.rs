@@ -9,7 +9,7 @@ use axum::{
 use flaps_domain::{ManagedBy, Project, ProjectKey};
 
 use crate::{
-    actor::extract_actor,
+    auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, compute_etag},
     recompile::{Change, evict_project_from_cache, install_in_cache, validate_by_compiling},
@@ -49,11 +49,12 @@ pub async fn get_project<S: Store>(
 /// `PUT /projects/{project}` -- upsert a project (idempotent).
 pub async fn put_project<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path(key): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Project>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
     // Path key must match body key.
@@ -117,10 +118,11 @@ pub async fn put_project<S: Store>(
 /// `DELETE /projects/{project}` -- delete a project.
 pub async fn delete_project<S: Store>(
     State(state): State<AppState<S>>,
+    principal: AdminPrincipal,
     Path(key): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let actor = extract_actor(&headers)?;
+    let actor = principal.username;
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
     // Ensure it exists.
