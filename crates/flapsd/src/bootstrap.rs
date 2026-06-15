@@ -9,7 +9,7 @@
 //! its stream, and closes the HTTP response body. This ensures all SSE clients
 //! disconnect cleanly without requiring explicit fan-out shutdown logic.
 
-use std::time::Duration;
+use std::{future::Future, pin::Pin, time::Duration};
 
 use anyhow::{Context as _, Result};
 use flaps_server::{
@@ -28,11 +28,51 @@ const BACKOFF_BASE_MS: u64 = 500;
 /// Maximum backoff delay, used as the ceiling for exponential growth.
 const BACKOFF_MAX_MS: u64 = 30_000;
 
-/// A closure type that attempts to produce a store, returning a [`Result`].
+/// An async closure type that attempts to produce a store, returning a [`Result`].
+///
+/// The closure returns a pinned, boxed future so it can be called from an async
+/// context without blocking the executor. This removes the need for
+/// `tokio::task::block_in_place` at the call site, which would panic on a
+/// single-threaded runtime.
 ///
 /// Used as a seam in tests to inject a controllable connector without adding a
 /// new trait or a dependency on a concrete store type at the call site.
-pub type ConnectorFn<S> = Box<dyn FnMut() -> Result<S> + Send>;
+pub type ConnectorFn<S> =
+    Box<dyn FnMut() -> Pin<Box<dyn Future<Output = Result<S>> + Send>> + Send>;
+
+/// Attempts to connect to the store using `connector`, retrying with
+/// exponential backoff on failure.
+///
+/// The delay starts at `base_ms` and doubles after each failure, capped at
+/// `max_ms`. After `max_attempts` failures the last error is returned.
+///
+/// # Errors
+/// Returns the last connection error when all attempts are exhausted.
+async fn connect_store_with_retry_inner<S>(
+    mut connector: ConnectorFn<S>,
+    base_ms: u64,
+    max_ms: u64,
+    max_attempts: u32,
+) -> Result<S> {
+    let mut delay_ms = base_ms;
+    let mut last_err = anyhow::anyhow!("no attempts made");
+
+    for attempt in 1..=max_attempts {
+        match connector().await {
+            Ok(store) => return Ok(store),
+            Err(e) => {
+                warn!(attempt, max = max_attempts, error = %e, "store connection failed; retrying");
+                last_err = e;
+                if attempt < max_attempts {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(max_ms);
+                }
+            }
+        }
+    }
+
+    Err(last_err).context("exhausted all store connection attempts")
+}
 
 /// Attempts to connect to the store using `connector`, retrying with
 /// exponential backoff on failure.
@@ -43,25 +83,14 @@ pub type ConnectorFn<S> = Box<dyn FnMut() -> Result<S> + Send>;
 ///
 /// # Errors
 /// Returns the last connection error when all attempts are exhausted.
-pub async fn connect_store_with_retry<S>(mut connector: ConnectorFn<S>) -> Result<S> {
-    let mut delay_ms = BACKOFF_BASE_MS;
-    let mut last_err = anyhow::anyhow!("no attempts made");
-
-    for attempt in 1..=MAX_CONNECT_ATTEMPTS {
-        match connector() {
-            Ok(store) => return Ok(store),
-            Err(e) => {
-                warn!(attempt, max = MAX_CONNECT_ATTEMPTS, error = %e, "store connection failed; retrying");
-                last_err = e;
-                if attempt < MAX_CONNECT_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = (delay_ms * 2).min(BACKOFF_MAX_MS);
-                }
-            }
-        }
-    }
-
-    Err(last_err).context("exhausted all store connection attempts")
+pub async fn connect_store_with_retry<S>(connector: ConnectorFn<S>) -> Result<S> {
+    connect_store_with_retry_inner(
+        connector,
+        BACKOFF_BASE_MS,
+        BACKOFF_MAX_MS,
+        MAX_CONNECT_ATTEMPTS,
+    )
+    .await
 }
 
 /// Warms up the compiled ruleset cache by compiling every (project, environment)
@@ -167,13 +196,26 @@ pub async fn bootstrap_admin_once<S: Store>(store: &S, username: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use flaps_domain::{Environment, EnvironmentKey, ManagedBy, Project, ProjectKey};
-    use flaps_server::state::AppState;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use flaps_domain::{
+        Environment, EnvironmentKey, FlagEnvConfig, FlagKey, FlagType, ManagedBy, Project,
+        ProjectKey, SdkKeyKind, SegmentKey, ServeTarget, TargetingRule, ValueType, VariantKey,
+        VariantValue, Variants,
+    };
+    use flaps_server::{build_router, state::AppState};
     use flaps_store::{
-        KeyHasher,
-        repository::{EnvironmentRepository as _, ProjectRepository as _},
+        KeyHasher, NewSdkKey, SdkKeyScope,
+        repository::{
+            EnvironmentRepository as _, FlagEnvConfigRepository as _, FlagRepository as _,
+            ProjectRepository as _, SdkKeyRepository as _,
+        },
         sqlite::SqliteStore,
     };
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
 
     use super::*;
 
@@ -241,6 +283,122 @@ mod tests {
         assert!(cache.is_empty(), "cache should be empty");
     }
 
+    /// Proves the best-effort contract: a valid environment is compiled into the
+    /// cache while a corrupt one (flag config references a missing segment) is
+    /// skipped. warm_up_cache must not panic and must not return Err.
+    #[tokio::test]
+    async fn warm_up_cache_skips_corrupt_env_and_keeps_valid_env() {
+        let store = make_store().await;
+        let project = ProjectKey::new("mixed").unwrap();
+
+        store
+            .upsert_project(
+                "test",
+                &Project {
+                    key: project.clone(),
+                    name: "Mixed".into(),
+                    description: None,
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // env-good: no flags, compiles to an empty ruleset (success).
+        let good_env = EnvironmentKey::new("env-good").unwrap();
+        store
+            .upsert_environment(
+                "test",
+                &project,
+                &Environment {
+                    key: good_env.clone(),
+                    name: "Good".into(),
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // env-corrupt: has a FlagEnvConfig referencing a segment that does not
+        // exist, which triggers CompileError::UnknownSegment.
+        let bad_env = EnvironmentKey::new("env-corrupt").unwrap();
+        store
+            .upsert_environment(
+                "test",
+                &project,
+                &Environment {
+                    key: bad_env.clone(),
+                    name: "Corrupt".into(),
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed a flag and a corrupt config (missing segment "ghost").
+        let flag_key = FlagKey::new("feat").unwrap();
+        let vk_on = VariantKey::new("on").unwrap();
+        let vk_off = VariantKey::new("off").unwrap();
+        let variants = Variants::new(
+            ValueType::Boolean,
+            [
+                (vk_on.clone(), VariantValue::Bool(true)),
+                (vk_off.clone(), VariantValue::Bool(false)),
+            ],
+        )
+        .unwrap();
+        store
+            .upsert_flag(
+                "test",
+                &project,
+                &flaps_domain::Flag {
+                    key: flag_key.clone(),
+                    name: "feat".into(),
+                    description: None,
+                    flag_type: FlagType::Release,
+                    value_type: ValueType::Boolean,
+                    variants,
+                },
+            )
+            .await
+            .unwrap();
+
+        let corrupt_config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![TargetingRule {
+                segments: vec![SegmentKey::new("ghost").unwrap()],
+                serve: ServeTarget::Fixed(vk_on),
+            }],
+            default_rule: ServeTarget::Fixed(vk_off),
+        };
+        store
+            .upsert_flag_env_config("test", &project, &flag_key, &bad_env, &corrupt_config)
+            .await
+            .unwrap();
+
+        let state = AppState::new(store);
+
+        // warm_up_cache must not panic and must not propagate the error.
+        warm_up_cache(&state).await;
+
+        let cache = state.cache.read().await;
+
+        // The valid environment must be warmed up.
+        assert!(
+            cache.contains_key(&(project.clone(), good_env)),
+            "valid env must be in cache after warm-up"
+        );
+
+        // The corrupt environment must be skipped.
+        assert!(
+            !cache.contains_key(&(project, bad_env)),
+            "corrupt env must not be inserted into cache"
+        );
+    }
+
     // -- bootstrap_admin_once --
 
     #[tokio::test]
@@ -306,45 +464,193 @@ mod tests {
 
         // Fail the first 3 attempts, succeed on the 4th.
         let connector: ConnectorFn<u32> = Box::new(move || {
-            let mut count = call_count_clone.lock().unwrap();
-            *count += 1;
-            if *count < 4 {
-                Err(anyhow::anyhow!("simulated connection failure"))
-            } else {
-                Ok(42u32)
-            }
+            let count_clone = Arc::clone(&call_count_clone);
+            Box::pin(async move {
+                let mut count = count_clone.lock().unwrap();
+                *count += 1;
+                if *count < 4 {
+                    Err(anyhow::anyhow!("simulated connection failure"))
+                } else {
+                    Ok(42u32)
+                }
+            })
         });
 
-        // Override sleep to zero to keep the test fast.
-        // The connector itself uses tokio::time::sleep; we patch the delays by
-        // reducing BACKOFF_BASE_MS conceptually. Since the constant is not
-        // injectable, the test relies on the fact that delays are bounded and
-        // that the function returns after exactly 4 attempts.
-        //
-        // To avoid 1.5 s of real sleep in CI, we wrap with a timeout.
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), connect_store_with_retry(connector)).await;
+        // Use base_ms = 0 so no real sleep occurs; verifies the full retry path
+        // in well under a millisecond.
+        let result = connect_store_with_retry_inner(connector, 0, 0, 10).await;
 
-        assert!(result.is_ok(), "should not have timed out");
-        let inner = result.unwrap();
-        assert!(inner.is_ok(), "expected Ok(42), got {inner:?}");
-        assert_eq!(inner.unwrap(), 42u32);
+        assert!(result.is_ok(), "expected Ok(42), got {result:?}");
+        assert_eq!(result.unwrap(), 42u32);
         assert_eq!(*call_count.lock().unwrap(), 4, "connector called 4 times");
     }
 
     /// Verifies that the connector returns Err when every attempt fails.
     ///
-    /// Marked `#[ignore]` because the real exponential backoff (10 attempts,
-    /// up to 30 s ceiling) takes ~2 minutes. The success path is covered by
-    /// `connect_store_with_retry_succeeds_after_n_failures`. Run manually with
-    /// `cargo test -- --ignored` when testing the full backoff schedule.
+    /// Uses base_ms = 0 via the inner helper so no real sleep occurs; the test
+    /// completes in milliseconds and does not need to be ignored.
     #[tokio::test]
-    #[ignore = "real backoff schedule takes ~2 minutes; run with --ignored to exercise"]
     async fn connect_store_with_retry_returns_err_after_max_attempts() {
-        let connector: ConnectorFn<u32> = Box::new(|| Err(anyhow::anyhow!("always fails")));
+        let connector: ConnectorFn<u32> =
+            Box::new(|| Box::pin(async { Err(anyhow::anyhow!("always fails")) }));
 
-        let result = connect_store_with_retry(connector).await;
+        let result = connect_store_with_retry_inner(connector, 0, 0, 10).await;
         assert!(result.is_err(), "expected Err after all attempts exhausted");
+    }
+
+    // -- AC#1: integration boot (warm-up + bootstrap + router serves warmed data) --
+
+    /// Proves AC#1 end-to-end using an in-memory SQLite store:
+    ///
+    /// 1. Seed a project, environment, flag, SDK key and FlagEnvConfig in the store.
+    /// 2. Run warm_up_cache so the compiled ruleset is loaded into the cache.
+    /// 3. Run bootstrap_admin_once to create the admin account.
+    /// 4. Build the router and exercise the OFREP single-flag evaluation endpoint
+    ///    via tower::oneshot with the seeded SDK key.
+    /// 5. Assert that the response status is 200 and the returned value comes from
+    ///    the compiled ruleset (the flag is disabled, so the response reason is
+    ///    DISABLED), proving the cache was consumed on the hot path.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn integration_boot_sqlite_warm_cache_and_router_serve_ofrep() {
+        let store = make_store().await;
+        let project_key = ProjectKey::new("boot-proj").unwrap();
+        let env_key = EnvironmentKey::new("boot-env").unwrap();
+
+        // Seed project.
+        store
+            .upsert_project(
+                "system",
+                &Project {
+                    key: project_key.clone(),
+                    name: "Boot project".into(),
+                    description: None,
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed environment.
+        store
+            .upsert_environment(
+                "system",
+                &project_key,
+                &Environment {
+                    key: env_key.clone(),
+                    name: "Boot env".into(),
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed a boolean flag with on/off variants.
+        let flag_key = FlagKey::new("boot-flag").unwrap();
+        let vk_on = VariantKey::new("on").unwrap();
+        let vk_off = VariantKey::new("off").unwrap();
+        let variants = Variants::new(
+            ValueType::Boolean,
+            [
+                (vk_on.clone(), VariantValue::Bool(true)),
+                (vk_off.clone(), VariantValue::Bool(false)),
+            ],
+        )
+        .unwrap();
+        store
+            .upsert_flag(
+                "system",
+                &project_key,
+                &flaps_domain::Flag {
+                    key: flag_key.clone(),
+                    name: "boot-flag".into(),
+                    description: None,
+                    flag_type: FlagType::Release,
+                    value_type: ValueType::Boolean,
+                    variants,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed a FlagEnvConfig: disabled flag with a fixed default (off).
+        // A disabled flag is the simplest valid config that exercises the
+        // full warm-up -> compile -> serve path without needing a targeting rule.
+        let flag_env_config = FlagEnvConfig {
+            enabled: false,
+            rules: vec![],
+            default_rule: ServeTarget::Fixed(vk_off),
+        };
+        store
+            .upsert_flag_env_config(
+                "system",
+                &project_key,
+                &flag_key,
+                &env_key,
+                &flag_env_config,
+            )
+            .await
+            .unwrap();
+
+        // Seed an SDK key so the OFREP endpoint can authenticate.
+        let raw_key = "s-boot-integration-test-key-01234";
+        let new_key = NewSdkKey {
+            scope: SdkKeyScope {
+                project_key: project_key.clone(),
+                environment_key: env_key.clone(),
+            },
+            kind: SdkKeyKind::Server,
+        };
+        store.create_sdk_key(raw_key, &new_key).await.unwrap();
+
+        // Warm up and bootstrap.
+        let state = AppState::new(store);
+        warm_up_cache(&state).await;
+        bootstrap_admin_once(&state.store, "admin").await.unwrap();
+
+        // The cache must contain the compiled ruleset for the seeded env.
+        {
+            let cache = state.cache.read().await;
+            assert!(
+                cache.contains_key(&(project_key.clone(), env_key.clone())),
+                "cache must contain the compiled ruleset after warm-up"
+            );
+        }
+
+        // Build the router and exercise the OFREP endpoint.
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/ofrep/v1/evaluate/flags/{}", flag_key.as_str()))
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {raw_key}"))
+            .body(Body::from(r#"{"context":{}}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "OFREP evaluation of a warmed flag must return 200"
+        );
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // A disabled flag yields reason DISABLED and no value: this data comes
+        // from the compiled ruleset inserted by warm_up_cache.
+        assert_eq!(
+            json["reason"].as_str(),
+            Some("DISABLED"),
+            "disabled flag from warmed cache must return reason DISABLED, got: {json}"
+        );
+        assert!(
+            json["value"].is_null(),
+            "disabled flag must omit value, got: {json}"
+        );
     }
 
     // -- AC#4 shutdown: broadcast bus --
