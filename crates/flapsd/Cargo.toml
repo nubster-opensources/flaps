@@ -15,7 +15,31 @@ categories.workspace = true
 name = "flapsd"
 path = "src/main.rs"
 
+[lib]
+name = "flapsd_lib"
+path = "src/lib.rs"
+
 [dependencies]
+flaps-store = { workspace = true }
+flaps-server = { workspace = true }
+flaps-domain = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+argon2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+tempfile = "3"
+temp-env = "0.3"
 
 [lints]
 workspace = true
