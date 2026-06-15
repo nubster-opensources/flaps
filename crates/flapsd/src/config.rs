@@ -113,13 +113,19 @@ impl Config {
 
     /// Returns the `bind_addr` parsed as a [`SocketAddr`].
     ///
-    /// Panics if called before [`Config::load`] validates the field, but that
-    /// cannot happen because `load` calls `validate` first.
-    #[must_use]
-    pub fn socket_addr(&self) -> SocketAddr {
+    /// # Errors
+    /// Returns [`ConfigError::InvalidBindAddr`] when the stored string cannot be
+    /// parsed. In practice this cannot happen when the config was loaded through
+    /// [`Config::load`], which validates the field upfront, but the fallible
+    /// signature is necessary because `Config` is `Deserialize` and could be
+    /// constructed without going through `load`.
+    pub fn socket_addr(&self) -> Result<SocketAddr, ConfigError> {
         self.bind_addr
             .parse()
-            .expect("bind_addr already validated in Config::load")
+            .map_err(|source| ConfigError::InvalidBindAddr {
+                addr: self.bind_addr.clone(),
+                source,
+            })
     }
 }
 

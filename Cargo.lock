@@ -595,6 +595,7 @@ dependencies = [
  "flaps-store",
  "http-body-util",
  "serde",
+ "serde_json",
  "temp-env",
  "tempfile",
  "thiserror",

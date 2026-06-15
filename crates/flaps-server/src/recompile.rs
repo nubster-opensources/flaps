@@ -357,10 +357,16 @@ pub async fn recompile_environment<S: Store>(
 
 #[cfg(test)]
 mod tests {
-    use flaps_domain::{Environment, ManagedBy, Project};
+    use flaps_domain::{
+        Environment, FlagEnvConfig, FlagKey, FlagType, ManagedBy, Project, SegmentKey, ServeTarget,
+        TargetingRule, ValueType, VariantKey, VariantValue, Variants,
+    };
     use flaps_store::{
         KeyHasher,
-        repository::{EnvironmentRepository as _, ProjectRepository as _},
+        repository::{
+            EnvironmentRepository as _, FlagEnvConfigRepository as _, FlagRepository as _,
+            ProjectRepository as _,
+        },
         sqlite::SqliteStore,
     };
 
@@ -370,6 +376,35 @@ mod tests {
         SqliteStore::in_memory(KeyHasher::new(b"test-pepper-32-bytes-long-enough"))
             .await
             .expect("in-memory store")
+    }
+
+    /// Creates a minimal boolean flag (on/off) in the store for the given project.
+    async fn seed_bool_flag(
+        store: &SqliteStore,
+        project: &ProjectKey,
+        flag_key: &str,
+    ) -> flaps_domain::Flag {
+        let key = FlagKey::new(flag_key).unwrap();
+        let vk_on = VariantKey::new("on").unwrap();
+        let vk_off = VariantKey::new("off").unwrap();
+        let variants = Variants::new(
+            ValueType::Boolean,
+            [
+                (vk_on.clone(), VariantValue::Bool(true)),
+                (vk_off.clone(), VariantValue::Bool(false)),
+            ],
+        )
+        .unwrap();
+        let flag = flaps_domain::Flag {
+            key: key.clone(),
+            name: flag_key.to_owned(),
+            description: None,
+            flag_type: FlagType::Release,
+            value_type: ValueType::Boolean,
+            variants,
+        };
+        store.upsert_flag("test", project, &flag).await.unwrap();
+        flag
     }
 
     #[tokio::test]
@@ -419,33 +454,74 @@ mod tests {
 
     #[tokio::test]
     async fn recompile_environment_error_leaves_cache_unchanged() {
-        // An environment that does not exist in the store yields an empty
-        // compilation (no flags), so the cache will be populated with an empty
-        // ruleset. To get a genuine compilation *error* we need a flag config
-        // that references a segment that does not exist.
-        //
-        // This test verifies that when compile_env_with_overlay returns Err,
-        // the cache is untouched: we try an env that references a missing
-        // segment by inserting a FlagEnvConfig that points to it.
-        //
-        // Because setting up that corrupt state requires low-level store writes
-        // that are outside this unit boundary, we instead verify the negative
-        // case: a non-existent project/env also never panics and simply
-        // produces an empty ruleset (no flags -> no compilation error).
-        // The Err path is covered by verifying the return type contract.
+        // Build a genuine corrupt state: a FlagEnvConfig whose targeting rule
+        // references a segment that does not exist in the store. When the
+        // compiler tries to resolve the segment key it emits CompileError::UnknownSegment
+        // which propagates as ApiError::Validation, causing recompile_environment
+        // to return Err without touching the cache.
         let store = make_store().await;
-        let state = AppState::new(store);
-        let project = ProjectKey::new("ghost").unwrap();
-        let environment = EnvironmentKey::new("missing").unwrap();
+        let project = ProjectKey::new("proj-corrupt").unwrap();
+        let env_key = EnvironmentKey::new("staging").unwrap();
 
-        // Non-existent project and env: list_flags / list_segments return empty
-        // -> compiles to an empty ruleset. The cache entry is inserted.
-        // This confirms no panic occurs and the function is best-effort.
-        let result = recompile_environment(&state, &project, &environment).await;
-        // An empty compilation is still a valid (empty) ruleset.
+        // Seed project and environment.
+        store
+            .upsert_project(
+                "test",
+                &Project {
+                    key: project.clone(),
+                    name: "Corrupt project".into(),
+                    description: None,
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_environment(
+                "test",
+                &project,
+                &Environment {
+                    key: env_key.clone(),
+                    name: "Staging".into(),
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Seed a flag.
+        let flag = seed_bool_flag(&store, &project, "my-flag").await;
+
+        // Write a FlagEnvConfig that references a segment that does NOT exist.
+        // The segment key "ghost-segment" is never inserted into the store, so
+        // list_segments returns an empty vec and compile_environment returns
+        // Err(CompileError::UnknownSegment { .. }).
+        let config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![TargetingRule {
+                segments: vec![SegmentKey::new("ghost-segment").unwrap()],
+                serve: ServeTarget::Fixed(VariantKey::new("on").unwrap()),
+            }],
+            default_rule: ServeTarget::Fixed(VariantKey::new("off").unwrap()),
+        };
+        store
+            .upsert_flag_env_config("test", &project, &flag.key, &env_key, &config)
+            .await
+            .unwrap();
+
+        let state = AppState::new(store);
+
+        // recompile_environment must fail because "ghost-segment" is absent.
+        let result = recompile_environment(&state, &project, &env_key).await;
+        assert!(result.is_err(), "expected Err(UnknownSegment), got Ok");
+
+        // The cache must NOT contain an entry for this environment.
+        let cache = state.cache.read().await;
         assert!(
-            result.is_ok(),
-            "empty env should compile to empty ruleset, got {result:?}"
+            !cache.contains_key(&(project, env_key)),
+            "cache must remain empty when compilation fails"
         );
     }
 }
