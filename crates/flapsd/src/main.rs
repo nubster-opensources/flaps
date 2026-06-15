@@ -67,9 +67,9 @@ pub async fn run(config_path: String) -> Result<()> {
         let store = connect_store_with_retry(Box::new(move || {
             let hasher_inner = hasher_clone.clone();
             let url_inner = url_sqlite.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(SqliteStore::connect(&url_inner, hasher_inner))
+            Box::pin(async move {
+                SqliteStore::connect(&url_inner, hasher_inner)
+                    .await
                     .map_err(anyhow::Error::from)
             })
         }))
@@ -85,9 +85,9 @@ pub async fn run(config_path: String) -> Result<()> {
         let store = connect_store_with_retry(Box::new(move || {
             let hasher_inner = hasher_clone.clone();
             let url_inner = url_pg.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(PostgresStore::connect(&url_inner, hasher_inner))
+            Box::pin(async move {
+                PostgresStore::connect(&url_inner, hasher_inner)
+                    .await
                     .map_err(anyhow::Error::from)
             })
         }))
@@ -110,7 +110,7 @@ async fn boot<S: flaps_server::state::Store>(
         .await
         .context("bootstrapping admin account")?;
 
-    let bind_addr = config.socket_addr();
+    let bind_addr = config.socket_addr().context("resolving bind address")?;
     let listener = TcpListener::bind(bind_addr)
         .await
         .with_context(|| format!("binding TCP listener on {bind_addr}"))?;
