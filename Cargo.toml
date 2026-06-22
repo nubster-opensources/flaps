@@ -60,7 +60,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-missing_docs = "warn"
+missing_docs = "deny"
 unreachable_pub = "warn"
 rust_2024_compatibility = { level = "warn", priority = -1 }
 
