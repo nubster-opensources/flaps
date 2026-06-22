@@ -6,11 +6,11 @@ Flaps uses a three-layer combo to ship new versions to crates.io. Whatever surfa
 
 ## Surfaces
 
-### Surface 1: GitHub UI (no CLI required)
+### Surface 1: Web UI (no CLI required)
 
 Use this when you want to bump from your browser, or when you do not have a local Rust toolchain handy.
 
-1. Open <https://github.com/nubster-opensources/flaps/actions/workflows/bump.yml>.
+1. Open the `bump.yml` workflow in the repository Actions tab.
 2. Click **Run workflow**.
 3. Pick the **level** input:
    - `patch`: `0.1.0` -> `0.1.1` (bug fixes)
@@ -96,7 +96,7 @@ The `xtask` crate is internal to the repository and is never published.
 - **`error: working tree must be clean`**: commit or stash your local changes.
 - **`error: branch release/vX.Y.Z-prep already exists locally`**: a previous bump for the same version is still around. Delete it (`git branch -D release/vX.Y.Z-prep`) or pick a different target.
 - **Pre-flight failure (fmt / clippy / test)**: fix the failure on `main` first via a normal PR, then retry the bump.
-- **`gh pr create` fails**: probably an auth issue. Verify `gh auth status`. In CI the `GITHUB_TOKEN` is provided automatically.
+- **`gh pr create` fails**: probably an auth issue. Verify `gh auth status`. In CI the repository token is provided automatically.
 - **CHANGELOG section not found**: the Python script expects `## [Unreleased]` followed by `## [` somewhere later. If you renamed `[Unreleased]` or removed the next section, the script aborts.
 
 ## Adding it to the project

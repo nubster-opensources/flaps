@@ -77,9 +77,8 @@ async fn connect_store_with_retry_inner<S>(
 /// Attempts to connect to the store using `connector`, retrying with
 /// exponential backoff on failure.
 ///
-/// The delay starts at [`BACKOFF_BASE_MS`] and doubles after each failure,
-/// capped at [`BACKOFF_MAX_MS`]. After [`MAX_CONNECT_ATTEMPTS`] failures the
-/// last error is returned.
+/// The delay starts at 500 ms and doubles after each failure,
+/// capped at 30 000 ms. After 10 failures the last error is returned.
 ///
 /// # Errors
 /// Returns the last connection error when all attempts are exhausted.
