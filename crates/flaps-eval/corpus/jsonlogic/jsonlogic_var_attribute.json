@@ -1,0 +1,17 @@
+{
+  "name": "jsonlogic_var_attribute",
+  "description": "{\"var\": \"country\"} with country=\"fr\" selects variant \"fr\". Oracle: JsonLogic spec, var reads a key from the data object.",
+  "flagd": {
+    "flags": {
+      "locale": {
+        "state": "ENABLED",
+        "variants": { "fr": "fr", "en": "en" },
+        "defaultVariant": "en",
+        "targeting": { "var": "country" }
+      }
+    }
+  },
+  "flagKey": "locale",
+  "context": { "attributes": { "country": "fr" }, "timestamp": 0 },
+  "expected": { "variant": "fr", "reason": "TARGETING_MATCH", "value": "fr" }
+}

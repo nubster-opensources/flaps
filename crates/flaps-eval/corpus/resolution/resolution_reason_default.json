@@ -1,0 +1,19 @@
+{
+  "name": "resolution_reason_default",
+  "description": "Targeting rule returns null (no match) -> flagd falls back to defaultVariant with reason DEFAULT. Oracle: flagd evaluation spec, rule returning null -> DEFAULT reason.",
+  "flagd": {
+    "flags": {
+      "betaFeature": {
+        "state": "ENABLED",
+        "variants": { "beta": true, "stable": false },
+        "defaultVariant": "stable",
+        "targeting": {
+          "if": [{ "==": [{ "var": "role" }, "beta_tester"] }, "beta", null]
+        }
+      }
+    }
+  },
+  "flagKey": "betaFeature",
+  "context": { "attributes": { "role": "regular" }, "timestamp": 0 },
+  "expected": { "variant": "stable", "reason": "DEFAULT", "value": false }
+}

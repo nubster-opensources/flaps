@@ -1,0 +1,17 @@
+{
+  "name": "error_parse_error",
+  "description": "A flagd document with an unknown operator in the targeting rule is rejected at parse time with PARSE_ERROR. Oracle: flagd schema, unknown operators are invalid.",
+  "flagd": {
+    "flags": {
+      "badFlag": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off",
+        "targeting": { "unknown_operator_xyz": ["foo", "bar"] }
+      }
+    }
+  },
+  "flagKey": "badFlag",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expectedError": "PARSE_ERROR"
+}

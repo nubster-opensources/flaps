@@ -1,0 +1,17 @@
+{
+  "name": "fractional_fifty_fifty_squarey_lands_blue",
+  "description": "murmur3(\"headerColor\" + \"squarey@example.com\") = 3228116633 -> bucket 75/100. Split [red:50, blue:50]: cumul red=50 <= 75, cumul blue=100 > 75 -> blue. Oracle: MurmurHash3 x86-32 seed 0 public vector.",
+  "flagd": {
+    "flags": {
+      "headerColor": {
+        "state": "ENABLED",
+        "variants": { "red": "red", "blue": "blue", "none": "none" },
+        "defaultVariant": "none",
+        "targeting": { "fractional": [["red", 50], ["blue", 50]] }
+      }
+    }
+  },
+  "flagKey": "headerColor",
+  "context": { "targetingKey": "squarey@example.com", "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "blue", "reason": "TARGETING_MATCH", "value": "blue" }
+}

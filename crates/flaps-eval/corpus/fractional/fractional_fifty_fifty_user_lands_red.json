@@ -1,0 +1,17 @@
+{
+  "name": "fractional_fifty_fifty_user_lands_red",
+  "description": "murmur3(\"headerColor\" + \"user:abc\") = 1681433475 -> bucket 39/100. Split [red:50, blue:50]: cumul red=50 > 39 -> red. Oracle: MurmurHash3 x86-32 seed 0 public vector.",
+  "flagd": {
+    "flags": {
+      "headerColor": {
+        "state": "ENABLED",
+        "variants": { "red": "red", "blue": "blue", "none": "none" },
+        "defaultVariant": "none",
+        "targeting": { "fractional": [["red", 50], ["blue", 50]] }
+      }
+    }
+  },
+  "flagKey": "headerColor",
+  "context": { "targetingKey": "user:abc", "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "red", "reason": "TARGETING_MATCH", "value": "red" }
+}

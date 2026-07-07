@@ -17,5 +17,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 semver = { workspace = true }
 
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true

@@ -1,0 +1,16 @@
+{
+  "name": "resolution_reason_disabled",
+  "description": "A flag with state DISABLED always resolves with reason DISABLED and null value/variant. Oracle: flagd evaluation spec, DISABLED state -> short-circuit, no rule evaluated.",
+  "flagd": {
+    "flags": {
+      "killedFeature": {
+        "state": "DISABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off"
+      }
+    }
+  },
+  "flagKey": "killedFeature",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": null, "reason": "DISABLED", "value": null }
+}

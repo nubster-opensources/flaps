@@ -1,0 +1,21 @@
+{
+  "name": "fractional_bucket_by_attribute_override",
+  "description": "bucket_by={\"var\":\"email\"} overrides the default flagKey+targetingKey concatenation. Bucketing key = attribute \"email\" = \"blue_user\". murmur3(\"blue_user\") = 3510234506 -> bucket 81/100. Split [on:50, off:50]: 81 >= 50 -> off. Oracle: MurmurHash3 x86-32 seed 0, computed independently.",
+  "flagd": {
+    "flags": {
+      "myFeature": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off",
+        "targeting": { "fractional": [{ "var": "email" }, ["on", 50], ["off", 50]] }
+      }
+    }
+  },
+  "flagKey": "myFeature",
+  "context": {
+    "targetingKey": "ignored_when_bucket_by_set",
+    "attributes": { "email": "blue_user" },
+    "timestamp": 0
+  },
+  "expected": { "variant": "off", "reason": "TARGETING_MATCH", "value": false }
+}

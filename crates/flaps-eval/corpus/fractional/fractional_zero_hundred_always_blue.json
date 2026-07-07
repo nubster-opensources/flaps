@@ -1,0 +1,17 @@
+{
+  "name": "fractional_zero_hundred_always_blue",
+  "description": "Split [red:0, blue:100]. Cumul red=0 which is never > any bucket (bucket in [0,99]); cumul blue=100 > any bucket. Any targeting key always lands in blue. Oracle: flagd spec section fractional, weight 0 means zero probability.",
+  "flagd": {
+    "flags": {
+      "headerColor": {
+        "state": "ENABLED",
+        "variants": { "red": "red", "blue": "blue" },
+        "defaultVariant": "red",
+        "targeting": { "fractional": [["red", 0], ["blue", 100]] }
+      }
+    }
+  },
+  "flagKey": "headerColor",
+  "context": { "targetingKey": "any_user", "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "blue", "reason": "TARGETING_MATCH", "value": "blue" }
+}
