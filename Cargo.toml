@@ -47,7 +47,7 @@ hex = "0.4"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.7", features = ["json", "macros"] }
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio-stream = { version = "0.1", features = ["sync"] }
 open-feature = { version = "0.3", features = ["test-util"] }
