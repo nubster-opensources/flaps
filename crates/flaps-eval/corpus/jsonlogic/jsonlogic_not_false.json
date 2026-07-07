@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_not_false",
+  "description": "{\"!\": [false]} -> true -> targeting match. Oracle: JsonLogic spec, ! negates the truthiness of its operand.",
+  "flagd": {
+    "flags": {
+      "notFlag": {
+        "state": "ENABLED",
+        "variants": { "yes": "yes", "no": "no" },
+        "defaultVariant": "no",
+        "targeting": {
+          "if": [{ "!": [false] }, "yes", null]
+        }
+      }
+    }
+  },
+  "flagKey": "notFlag",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "yes", "reason": "TARGETING_MATCH", "value": "yes" }
+}

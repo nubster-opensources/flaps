@@ -1,0 +1,16 @@
+{
+  "name": "resolution_reason_static",
+  "description": "A flag with no targeting rule always resolves the defaultVariant with reason STATIC. Oracle: flagd evaluation spec, no targeting -> STATIC reason.",
+  "flagd": {
+    "flags": {
+      "simpleFlag": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "on"
+      }
+    }
+  },
+  "flagKey": "simpleFlag",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "on", "reason": "STATIC", "value": true }
+}

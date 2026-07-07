@@ -1,0 +1,19 @@
+{
+  "name": "targeting_ends_with_match",
+  "description": "{\"ends_with\": [{\"var\": \"email\"}, \".com\"]} with email=\"user@example.com\" -> true. Oracle: flagd targeting spec, ends_with returns true when left string ends with right string.",
+  "flagd": {
+    "flags": {
+      "comDomain": {
+        "state": "ENABLED",
+        "variants": { "yes": true, "no": false },
+        "defaultVariant": "no",
+        "targeting": {
+          "if": [{ "ends_with": [{ "var": "email" }, ".com"] }, "yes", null]
+        }
+      }
+    }
+  },
+  "flagKey": "comDomain",
+  "context": { "attributes": { "email": "user@example.com" }, "timestamp": 0 },
+  "expected": { "variant": "yes", "reason": "TARGETING_MATCH", "value": true }
+}

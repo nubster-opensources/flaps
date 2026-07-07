@@ -1,0 +1,19 @@
+{
+  "name": "resolution_reason_targeting_match",
+  "description": "Targeting rule returns a non-null variant -> reason is TARGETING_MATCH. Oracle: flagd evaluation spec, successful targeting rule -> TARGETING_MATCH reason.",
+  "flagd": {
+    "flags": {
+      "betaFeature": {
+        "state": "ENABLED",
+        "variants": { "beta": true, "stable": false },
+        "defaultVariant": "stable",
+        "targeting": {
+          "if": [{ "==": [{ "var": "role" }, "beta_tester"] }, "beta", null]
+        }
+      }
+    }
+  },
+  "flagKey": "betaFeature",
+  "context": { "attributes": { "role": "beta_tester" }, "timestamp": 0 },
+  "expected": { "variant": "beta", "reason": "TARGETING_MATCH", "value": true }
+}

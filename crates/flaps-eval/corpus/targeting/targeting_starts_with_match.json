@@ -1,0 +1,19 @@
+{
+  "name": "targeting_starts_with_match",
+  "description": "{\"starts_with\": [{\"var\": \"email\"}, \"admin\"]} with email=\"admin@example.com\" -> true. Oracle: flagd targeting spec, starts_with returns true when left string begins with right string.",
+  "flagd": {
+    "flags": {
+      "adminAccess": {
+        "state": "ENABLED",
+        "variants": { "granted": true, "denied": false },
+        "defaultVariant": "denied",
+        "targeting": {
+          "if": [{ "starts_with": [{ "var": "email" }, "admin"] }, "granted", null]
+        }
+      }
+    }
+  },
+  "flagKey": "adminAccess",
+  "context": { "attributes": { "email": "admin@example.com" }, "timestamp": 0 },
+  "expected": { "variant": "granted", "reason": "TARGETING_MATCH", "value": true }
+}

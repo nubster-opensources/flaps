@@ -1,0 +1,17 @@
+{
+  "name": "jsonlogic_if_true_branch",
+  "description": "{\"if\": [true, \"yes\", \"no\"]} -> \"yes\". Oracle: JsonLogic spec, if returns second arg when condition is truthy.",
+  "flagd": {
+    "flags": {
+      "ifFlag": {
+        "state": "ENABLED",
+        "variants": { "yes": "yes", "no": "no" },
+        "defaultVariant": "no",
+        "targeting": { "if": [true, "yes", "no"] }
+      }
+    }
+  },
+  "flagKey": "ifFlag",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "yes", "reason": "TARGETING_MATCH", "value": "yes" }
+}

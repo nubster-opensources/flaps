@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_or_one_true",
+  "description": "{\"or\":[false, true]} -> true -> targeting match. Oracle: flagd targeting spec uses \"or\" for logical disjunction; true when at least one operand is truthy.",
+  "flagd": {
+    "flags": {
+      "orFlag": {
+        "state": "ENABLED",
+        "variants": { "yes": "yes", "no": "no" },
+        "defaultVariant": "no",
+        "targeting": {
+          "if": [{ "or": [false, true] }, "yes", null]
+        }
+      }
+    }
+  },
+  "flagKey": "orFlag",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "yes", "reason": "TARGETING_MATCH", "value": "yes" }
+}

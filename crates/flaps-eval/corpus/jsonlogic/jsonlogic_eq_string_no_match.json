@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_eq_string_no_match",
+  "description": "{\"==\": [{\"var\": \"role\"}, \"admin\"]} with role=user -> false -> null -> default variant. Oracle: JsonLogic spec, == false when strings differ.",
+  "flagd": {
+    "flags": {
+      "adminPanel": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off",
+        "targeting": {
+          "if": [{ "==": [{ "var": "role" }, "admin"] }, "on", null]
+        }
+      }
+    }
+  },
+  "flagKey": "adminPanel",
+  "context": { "attributes": { "role": "user" }, "timestamp": 0 },
+  "expected": { "variant": "off", "reason": "DEFAULT", "value": false }
+}

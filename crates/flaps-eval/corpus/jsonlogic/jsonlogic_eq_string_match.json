@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_eq_string_match",
+  "description": "{\"==\": [{\"var\": \"role\"}, \"admin\"]} with role=admin -> true -> targeting match. Oracle: JsonLogic spec, == is strict equality for same-type string values.",
+  "flagd": {
+    "flags": {
+      "adminPanel": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off",
+        "targeting": {
+          "if": [{ "==": [{ "var": "role" }, "admin"] }, "on", null]
+        }
+      }
+    }
+  },
+  "flagKey": "adminPanel",
+  "context": { "attributes": { "role": "admin" }, "timestamp": 0 },
+  "expected": { "variant": "on", "reason": "TARGETING_MATCH", "value": true }
+}

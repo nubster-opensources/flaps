@@ -1,0 +1,17 @@
+{
+  "name": "fractional_hundred_zero_always_on",
+  "description": "Split [on:100, off:0]. Cumul on=100 > any bucket in [0,99]. Any targeting key always lands in on. Oracle: flagd spec fractional, weight 100 means full allocation.",
+  "flagd": {
+    "flags": {
+      "rollout": {
+        "state": "ENABLED",
+        "variants": { "on": true, "off": false },
+        "defaultVariant": "off",
+        "targeting": { "fractional": [["on", 100], ["off", 0]] }
+      }
+    }
+  },
+  "flagKey": "rollout",
+  "context": { "targetingKey": "any_user", "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "on", "reason": "TARGETING_MATCH", "value": true }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_and_one_false",
+  "description": "{\"and\": [true, false]} -> false -> null -> default. Oracle: flagd targeting spec uses \"and\" for logical conjunction; false when any operand is falsy.",
+  "flagd": {
+    "flags": {
+      "combo": {
+        "state": "ENABLED",
+        "variants": { "yes": "yes", "no": "no" },
+        "defaultVariant": "no",
+        "targeting": {
+          "if": [{ "and": [true, false] }, "yes", null]
+        }
+      }
+    }
+  },
+  "flagKey": "combo",
+  "context": { "attributes": {}, "timestamp": 0 },
+  "expected": { "variant": "no", "reason": "DEFAULT", "value": "no" }
+}

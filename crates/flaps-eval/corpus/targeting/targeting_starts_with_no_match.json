@@ -1,0 +1,19 @@
+{
+  "name": "targeting_starts_with_no_match",
+  "description": "{\"starts_with\": [{\"var\": \"email\"}, \"admin\"]} with email=\"user@example.com\" -> false -> null -> default. Oracle: flagd targeting spec.",
+  "flagd": {
+    "flags": {
+      "adminAccess": {
+        "state": "ENABLED",
+        "variants": { "granted": true, "denied": false },
+        "defaultVariant": "denied",
+        "targeting": {
+          "if": [{ "starts_with": [{ "var": "email" }, "admin"] }, "granted", null]
+        }
+      }
+    }
+  },
+  "flagKey": "adminAccess",
+  "context": { "attributes": { "email": "user@example.com" }, "timestamp": 0 },
+  "expected": { "variant": "denied", "reason": "DEFAULT", "value": false }
+}

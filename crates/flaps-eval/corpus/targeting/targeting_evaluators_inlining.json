@@ -1,0 +1,22 @@
+{
+  "name": "targeting_evaluators_inlining",
+  "description": "$evaluators defines a reusable rule \"isAdmin\" which is referenced in the flag targeting. The parser inlines $evaluators at parse time. Oracle: flagd targeting spec section on $evaluators.",
+  "flagd": {
+    "$evaluators": {
+      "isAdmin": { "==": [{ "var": "role" }, "admin"] }
+    },
+    "flags": {
+      "dashboard": {
+        "state": "ENABLED",
+        "variants": { "full": "full", "basic": "basic" },
+        "defaultVariant": "basic",
+        "targeting": {
+          "if": [{ "$ref": "isAdmin" }, "full", null]
+        }
+      }
+    }
+  },
+  "flagKey": "dashboard",
+  "context": { "attributes": { "role": "admin" }, "timestamp": 0 },
+  "expected": { "variant": "full", "reason": "TARGETING_MATCH", "value": "full" }
+}

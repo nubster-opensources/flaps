@@ -1,0 +1,19 @@
+{
+  "name": "resolution_number_variant",
+  "description": "A flag with numeric variant values resolves the correct number. Oracle: flagd schema, variants can be number type; value field carries the resolved number.",
+  "flagd": {
+    "flags": {
+      "timeout": {
+        "state": "ENABLED",
+        "variants": { "short": 100, "long": 5000 },
+        "defaultVariant": "short",
+        "targeting": {
+          "if": [{ "==": [{ "var": "plan" }, "enterprise"] }, "long", null]
+        }
+      }
+    }
+  },
+  "flagKey": "timeout",
+  "context": { "attributes": { "plan": "enterprise" }, "timestamp": 0 },
+  "expected": { "variant": "long", "reason": "TARGETING_MATCH", "value": 5000.0 }
+}

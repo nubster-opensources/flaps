@@ -1,0 +1,19 @@
+{
+  "name": "jsonlogic_neq_strings",
+  "description": "{\"!=\": [{\"var\": \"tier\"}, \"free\"]} with tier=pro -> true -> targeting match. Oracle: JsonLogic spec, != true when values differ.",
+  "flagd": {
+    "flags": {
+      "premiumFeature": {
+        "state": "ENABLED",
+        "variants": { "enabled": true, "disabled": false },
+        "defaultVariant": "disabled",
+        "targeting": {
+          "if": [{ "!=": [{ "var": "tier" }, "free"] }, "enabled", null]
+        }
+      }
+    }
+  },
+  "flagKey": "premiumFeature",
+  "context": { "attributes": { "tier": "pro" }, "timestamp": 0 },
+  "expected": { "variant": "enabled", "reason": "TARGETING_MATCH", "value": true }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "jsonlogic_and_both_true",
+  "description": "{\"and\": [{\"==\": [{\"var\": \"a\"}, 1]}, {\"==\": [{\"var\": \"b\"}, 2]}]} with a=1,b=2 -> true. Oracle: flagd targeting spec uses \"and\" (not \"&&\") for logical conjunction; true iff all operands are truthy.",
+  "flagd": {
+    "flags": {
+      "combo": {
+        "state": "ENABLED",
+        "variants": { "yes": "yes", "no": "no" },
+        "defaultVariant": "no",
+        "targeting": {
+          "if": [
+            { "and": [{ "==": [{ "var": "a" }, 1] }, { "==": [{ "var": "b" }, 2] }] },
+            "yes",
+            null
+          ]
+        }
+      }
+    }
+  },
+  "flagKey": "combo",
+  "context": { "attributes": { "a": 1, "b": 2 }, "timestamp": 0 },
+  "expected": { "variant": "yes", "reason": "TARGETING_MATCH", "value": "yes" }
+}
