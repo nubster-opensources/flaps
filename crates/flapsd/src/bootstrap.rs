@@ -602,7 +602,10 @@ mod tests {
             },
             kind: SdkKeyKind::Server,
         };
-        store.create_sdk_key(raw_key, &new_key).await.unwrap();
+        store
+            .create_sdk_key("system", raw_key, &new_key)
+            .await
+            .unwrap();
 
         // Warm up and bootstrap.
         let state = AppState::new(store);

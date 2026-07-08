@@ -15,8 +15,12 @@ pub trait SdkKeyRepository: Send + Sync {
     /// Hashes `raw_key` with the store's [`KeyHasher`](crate::KeyHasher), derives the
     /// readable prefix (the leading 12 characters of `raw_key`, or the whole value if
     /// shorter), and persists the secret-free record.
+    ///
+    /// The insert and the resulting `sdk_key.issued` audit entry happen in the same
+    /// transaction, symmetrically to [`revoke_sdk_key`](Self::revoke_sdk_key).
     fn create_sdk_key(
         &self,
+        actor: &str,
         raw_key: &str,
         new_key: &NewSdkKey,
     ) -> impl Future<Output = StoreResult<SdkKeyRecord>> + Send;

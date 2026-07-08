@@ -63,11 +63,9 @@ pub async fn post_sdk_key<S: Store>(
 
     let record = state
         .store
-        .create_sdk_key(&raw_key, &new_key)
+        .create_sdk_key(&principal.username, &raw_key, &new_key)
         .await
         .map_err(ApiError::from)?;
-
-    let _ = principal; // actor auditing is done inside the store
 
     Ok((
         StatusCode::CREATED,

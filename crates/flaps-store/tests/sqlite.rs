@@ -47,7 +47,10 @@ async fn sdk_key_is_hashed_at_rest() {
             environment_key: EnvironmentKey::new("production").unwrap(),
         },
     };
-    let record = store.create_sdk_key(raw_key, &new_key).await.unwrap();
+    let record = store
+        .create_sdk_key("tester", raw_key, &new_key)
+        .await
+        .unwrap();
 
     // The prefix must equal the first 12 chars of the raw key.
     let expected_prefix: String = raw_key.chars().take(12).collect();
