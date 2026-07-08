@@ -5,7 +5,7 @@ mod shared;
 use flaps_domain::{EnvironmentKey, ProjectKey, SdkKeyKind};
 use flaps_store::{
     KeyHasher, NewSdkKey, SdkKeyScope,
-    repository::{EnvironmentRepository, ProjectRepository, SdkKeyRepository},
+    repository::{AccountRepository, EnvironmentRepository, ProjectRepository, SdkKeyRepository},
     sqlite::SqliteStore,
 };
 
@@ -92,4 +92,56 @@ async fn sdk_key_is_hashed_at_rest() {
         hasher_b.hash(raw_key),
         "different peppers must produce different hashes"
     );
+}
+
+/// Closes the coverage gap left by `test_verify_credentials_inactive_account`
+/// in the shared suite (a documented no-op there, since `AccountRepository`
+/// exposes no deactivation method). Uses a file-backed SQLite database so a
+/// second raw connection can flip `is_active` directly, then asserts
+/// `verify_credentials` still returns `None` (#51: this must hold whether the
+/// account is unknown, inactive, or the password is wrong; the dummy-hash
+/// timing equalization does not change this observable behaviour).
+#[tokio::test]
+async fn inactive_account_cannot_authenticate() {
+    let db_path = std::env::temp_dir().join(format!("flaps-test-{}.sqlite3", uuid::Uuid::new_v4()));
+    let url = format!("sqlite://{}?mode=rwc", db_path.display());
+
+    let store = SqliteStore::connect(&url, KeyHasher::new(b"inactive-test-pepper".to_vec()))
+        .await
+        .unwrap();
+
+    store
+        .create_account("system", "dave-inactive", "correct-password")
+        .await
+        .unwrap();
+
+    // Sanity check: the account authenticates while active.
+    let found = store
+        .verify_credentials("dave-inactive", "correct-password")
+        .await
+        .unwrap();
+    assert!(found.is_some(), "active account must authenticate");
+
+    // Deactivate directly via a second raw connection to the same file.
+    let raw_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE accounts SET is_active = 0 WHERE username = ?")
+        .bind("dave-inactive")
+        .execute(&raw_pool)
+        .await
+        .unwrap();
+    raw_pool.close().await;
+
+    let found = store
+        .verify_credentials("dave-inactive", "correct-password")
+        .await
+        .unwrap();
+    assert!(
+        found.is_none(),
+        "inactive account must return None even with the correct password (anti-enumeration)"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
 }
