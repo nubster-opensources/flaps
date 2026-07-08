@@ -38,4 +38,6 @@ pub struct SdkKeyRecord {
     pub scope: SdkKeyScope,
     /// ISO-8601 UTC creation timestamp.
     pub created_at: String,
+    /// ISO-8601 UTC revocation timestamp, or `None` if the key is still active.
+    pub revoked_at: Option<String>,
 }

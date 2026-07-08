@@ -190,6 +190,9 @@ where
     test_list_sdk_keys_includes_revoked(&store).await;
     test_find_sdk_key_ignores_revoked(&store).await;
     test_audit_account_and_key_revocation(&store).await;
+    // #50/#52 hardening follow-ups.
+    test_create_sdk_key_is_audited(&store).await;
+    test_list_sdk_keys_reports_revoked_at(&store).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +473,7 @@ async fn test_cascade_delete<
         },
     };
     store
-        .create_sdk_key("cascade-raw-sdk-key-12345", &sdk_new)
+        .create_sdk_key("tester", "cascade-raw-sdk-key-12345", &sdk_new)
         .await
         .unwrap();
 
@@ -547,7 +550,7 @@ async fn test_sdk_key_lookup_by_raw<
         },
     };
     let raw = "sdk-client-raw-key-xyz";
-    store.create_sdk_key(raw, &new_key).await.unwrap();
+    store.create_sdk_key("tester", raw, &new_key).await.unwrap();
 
     let found = store.find_sdk_key(raw).await.unwrap();
     assert!(found.is_some(), "should find the sdk key by raw value");
@@ -1159,7 +1162,7 @@ async fn test_revoke_sdk_key_then_find<
             environment_key: env.key.clone(),
         },
     };
-    let record = store.create_sdk_key(raw, &new_key).await.unwrap();
+    let record = store.create_sdk_key("tester", raw, &new_key).await.unwrap();
 
     store
         .revoke_sdk_key("tester", &proj.key, &env.key, &record.prefix)
@@ -1202,11 +1205,19 @@ async fn test_list_sdk_keys_includes_revoked<
     };
 
     let rec1 = store
-        .create_sdk_key("list-key-active-12345", &new_key(SdkKeyKind::Server))
+        .create_sdk_key(
+            "tester",
+            "list-key-active-12345",
+            &new_key(SdkKeyKind::Server),
+        )
         .await
         .unwrap();
     let rec2 = store
-        .create_sdk_key("list-key-revoked-12345", &new_key(SdkKeyKind::Client))
+        .create_sdk_key(
+            "tester",
+            "list-key-revoked-12345",
+            &new_key(SdkKeyKind::Client),
+        )
         .await
         .unwrap();
 
@@ -1272,11 +1283,11 @@ async fn test_find_sdk_key_ignores_revoked<
     let revoked_raw = "revoked-key-xyz-12345678";
 
     let revoked_rec = store
-        .create_sdk_key(revoked_raw, &new_key(SdkKeyKind::Server))
+        .create_sdk_key("tester", revoked_raw, &new_key(SdkKeyKind::Server))
         .await
         .unwrap();
     store
-        .create_sdk_key(active_raw, &new_key(SdkKeyKind::Client))
+        .create_sdk_key("tester", active_raw, &new_key(SdkKeyKind::Client))
         .await
         .unwrap();
 
@@ -1352,7 +1363,7 @@ async fn test_audit_account_and_key_revocation<
             environment_key: env.key.clone(),
         },
     };
-    let rec = store.create_sdk_key(raw, &new_key).await.unwrap();
+    let rec = store.create_sdk_key("admin", raw, &new_key).await.unwrap();
 
     let before_revoke = store.list_audit_entries().await.unwrap().len();
     store
@@ -1372,4 +1383,131 @@ async fn test_audit_account_and_key_revocation<
     );
 
     store.delete_project("admin", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 14: create_sdk_key_is_audited (#50)
+// ---------------------------------------------------------------------------
+
+async fn test_create_sdk_key_is_audited<
+    S: ProjectRepository + EnvironmentRepository + SdkKeyRepository + AuditLogRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("issue-audit-proj");
+    let env = make_env("issue-audit-env");
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let new_key = NewSdkKey {
+        kind: SdkKeyKind::Server,
+        scope: SdkKeyScope {
+            project_key: proj.key.clone(),
+            environment_key: env.key.clone(),
+        },
+    };
+    let raw = "issue-audit-raw-key-12345";
+
+    let before_create = store.list_audit_entries().await.unwrap().len();
+    let record = store.create_sdk_key("issuer", raw, &new_key).await.unwrap();
+    let after_create = store.list_audit_entries().await.unwrap();
+
+    assert!(
+        after_create.len() > before_create,
+        "SDK key issuance must produce an audit entry"
+    );
+
+    let expected_entity_id = format!(
+        "{}/{}/{}",
+        proj.key.as_str(),
+        env.key.as_str(),
+        record.prefix
+    );
+    assert!(
+        after_create.iter().any(|e| e.action == "sdk_key.issued"
+            && e.entity_type == "sdk_key"
+            && e.entity_id == expected_entity_id
+            && e.actor == "issuer"),
+        "issuance audit entry must reference the created sdk key with the correct actor"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// TDD case 15: list_sdk_keys_reports_revoked_at (#52)
+// ---------------------------------------------------------------------------
+
+async fn test_list_sdk_keys_reports_revoked_at<
+    S: ProjectRepository + EnvironmentRepository + SdkKeyRepository,
+>(
+    store: &S,
+) {
+    let proj = make_project("revoked-at-proj");
+    let env = make_env("revoked-at-env");
+    store.upsert_project("tester", &proj).await.unwrap();
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let scope = SdkKeyScope {
+        project_key: proj.key.clone(),
+        environment_key: env.key.clone(),
+    };
+    let new_key = |kind| NewSdkKey {
+        kind,
+        scope: scope.clone(),
+    };
+
+    let active_rec = store
+        .create_sdk_key(
+            "tester",
+            "revoked-at-active-12345",
+            &new_key(SdkKeyKind::Server),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        active_rec.revoked_at, None,
+        "a freshly created key must not be revoked"
+    );
+
+    let revoked_rec = store
+        .create_sdk_key(
+            "tester",
+            "revoked-at-revoked-12345",
+            &new_key(SdkKeyKind::Client),
+        )
+        .await
+        .unwrap();
+    store
+        .revoke_sdk_key("tester", &proj.key, &env.key, &revoked_rec.prefix)
+        .await
+        .unwrap();
+
+    let list = store.list_sdk_keys("tester", &scope).await.unwrap();
+
+    let active = list
+        .iter()
+        .find(|r| r.prefix == active_rec.prefix)
+        .expect("active key must be in the list");
+    assert_eq!(
+        active.revoked_at, None,
+        "active key must have revoked_at == None"
+    );
+
+    let revoked = list
+        .iter()
+        .find(|r| r.prefix == revoked_rec.prefix)
+        .expect("revoked key must be in the list");
+    assert!(
+        revoked.revoked_at.is_some(),
+        "revoked key must have revoked_at populated"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
 }
