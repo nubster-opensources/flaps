@@ -990,6 +990,7 @@ impl FlagEnvConfigRepository for PostgresStore {
 impl SdkKeyRepository for PostgresStore {
     async fn create_sdk_key(
         &self,
+        actor: &str,
         raw_key: &str,
         new_key: &NewSdkKey,
     ) -> StoreResult<SdkKeyRecord> {
@@ -998,6 +999,8 @@ impl SdkKeyRepository for PostgresStore {
         let kind_str = serde_json::to_string(&new_key.kind)?;
         let kind_str = kind_str.trim_matches('"');
         let now = crate::clock::now_rfc3339();
+
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             r"INSERT INTO sdk_keys (key_hash, prefix, kind, project_key, environment_key, created_at)
@@ -1009,62 +1012,51 @@ impl SdkKeyRepository for PostgresStore {
         .bind(new_key.scope.project_key.as_str())
         .bind(new_key.scope.environment_key.as_str())
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        // Audit the issuance, symmetrically to revocation, in the same transaction.
+        let entity_id = format!(
+            "{}/{}/{}",
+            new_key.scope.project_key.as_str(),
+            new_key.scope.environment_key.as_str(),
+            prefix
+        );
+        let audit = AuditRecord {
+            actor: actor.to_owned(),
+            action: "sdk_key.issued".to_owned(),
+            entity_type: "sdk_key".to_owned(),
+            entity_id,
+            before: None,
+            after: None,
+            occurred_at: now.clone(),
+        };
+        append_audit(&mut *tx, &audit).await?;
+
+        tx.commit().await?;
 
         Ok(SdkKeyRecord {
             prefix,
             kind: new_key.kind,
             scope: new_key.scope.clone(),
             created_at: now,
+            revoked_at: None,
         })
     }
 
     async fn find_sdk_key(&self, raw_key: &str) -> StoreResult<Option<SdkKeyRecord>> {
         let key_hash = self.hasher.hash(raw_key);
 
-        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT prefix, kind, project_key, environment_key, created_at \
+        let row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT prefix, kind, project_key, environment_key, created_at, revoked_at \
              FROM sdk_keys WHERE key_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&key_hash)
         .fetch_optional(&self.pool)
         .await?;
 
-        row.map(|(prefix, kind_str, proj_key, env_key, created_at)| {
-            let kind = serde_json::from_str(&format!(r#""{kind_str}""#))?;
-            Ok(SdkKeyRecord {
-                prefix,
-                kind,
-                scope: SdkKeyScope {
-                    project_key: ProjectKey::new(proj_key).map_err(|e| domain_key_err(&e))?,
-                    environment_key: EnvironmentKey::new(env_key)
-                        .map_err(|e| domain_key_err(&e))?,
-                },
-                created_at,
-            })
-        })
-        .transpose()
-    }
-
-    async fn list_sdk_keys(
-        &self,
-        _actor: &str,
-        scope: &SdkKeyScope,
-    ) -> StoreResult<Vec<SdkKeyRecord>> {
-        let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT prefix, kind, project_key, environment_key, created_at \
-             FROM sdk_keys \
-             WHERE project_key = $1 AND environment_key = $2 \
-             ORDER BY created_at ASC",
-        )
-        .bind(scope.project_key.as_str())
-        .bind(scope.environment_key.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|(prefix, kind_str, proj_key, env_key, created_at)| {
+        row.map(
+            |(prefix, kind_str, proj_key, env_key, created_at, revoked_at)| {
                 let kind = serde_json::from_str(&format!(r#""{kind_str}""#))?;
                 Ok(SdkKeyRecord {
                     prefix,
@@ -1075,8 +1067,47 @@ impl SdkKeyRepository for PostgresStore {
                             .map_err(|e| domain_key_err(&e))?,
                     },
                     created_at,
+                    revoked_at,
                 })
-            })
+            },
+        )
+        .transpose()
+    }
+
+    async fn list_sdk_keys(
+        &self,
+        _actor: &str,
+        scope: &SdkKeyScope,
+    ) -> StoreResult<Vec<SdkKeyRecord>> {
+        let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT prefix, kind, project_key, environment_key, created_at, revoked_at \
+             FROM sdk_keys \
+             WHERE project_key = $1 AND environment_key = $2 \
+             ORDER BY created_at ASC",
+        )
+        .bind(scope.project_key.as_str())
+        .bind(scope.environment_key.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(
+                |(prefix, kind_str, proj_key, env_key, created_at, revoked_at)| {
+                    let kind = serde_json::from_str(&format!(r#""{kind_str}""#))?;
+                    Ok(SdkKeyRecord {
+                        prefix,
+                        kind,
+                        scope: SdkKeyScope {
+                            project_key: ProjectKey::new(proj_key)
+                                .map_err(|e| domain_key_err(&e))?,
+                            environment_key: EnvironmentKey::new(env_key)
+                                .map_err(|e| domain_key_err(&e))?,
+                        },
+                        created_at,
+                        revoked_at,
+                    })
+                },
+            )
             .collect()
     }
 
