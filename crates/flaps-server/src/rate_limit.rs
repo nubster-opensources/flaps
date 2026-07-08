@@ -129,3 +129,76 @@ impl RateLimiter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn config(capacity: u32, refill_per_second: f64) -> RateLimitConfig {
+        RateLimitConfig {
+            enabled: true,
+            capacity,
+            refill_per_second,
+        }
+    }
+
+    #[test]
+    fn sweep_evicts_refilled_buckets() {
+        let limiter = RateLimiter::with_max_buckets(config(1, 1.0), 2);
+        let t0 = Instant::now();
+
+        assert!(limiter.check_at("alice", t0).is_ok());
+        assert!(limiter.check_at("bob", t0).is_ok());
+
+        // Both buckets are fully refilled by t0 + 10s (capacity 1, refill 1/s).
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(limiter.check_at("carol", t1).is_ok());
+
+        assert!(limiter.bucket_count() <= 2);
+    }
+
+    #[test]
+    fn hard_cap_evicts_least_active_when_all_active() {
+        let limiter = RateLimiter::with_max_buckets(config(10, 1.0), 2);
+        let t0 = Instant::now();
+
+        // All three keys are checked at the same instant, so all buckets
+        // remain active (tokens < capacity, none fully refilled).
+        assert!(limiter.check_at("alice", t0).is_ok());
+        assert!(limiter.check_at("bob", t0).is_ok());
+        assert!(limiter.check_at("carol", t0).is_ok());
+
+        assert!(limiter.bucket_count() <= 2);
+    }
+
+    #[test]
+    fn eviction_preserves_rate_limit_semantics() {
+        let limiter = RateLimiter::with_max_buckets(config(1, 1.0), 2);
+        let t0 = Instant::now();
+
+        assert!(limiter.check_at("alice", t0).is_ok());
+        assert!(limiter.check_at("bob", t0).is_ok());
+
+        // Fully refills alice and bob, then evicts them via the sweep.
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(limiter.check_at("carol", t1).is_ok());
+
+        // Alice was evicted while fully refilled: rechecking her behaves
+        // like a brand-new bucket, allowed `capacity` (1) times.
+        assert!(limiter.check_at("alice", t1).is_ok());
+        assert_eq!(limiter.check_at("alice", t1), Err(1));
+    }
+
+    #[test]
+    fn no_sweep_below_cap() {
+        let limiter = RateLimiter::with_max_buckets(config(10, 1.0), 10);
+        let t0 = Instant::now();
+
+        assert!(limiter.check_at("alice", t0).is_ok());
+        assert!(limiter.check_at("bob", t0).is_ok());
+        assert!(limiter.check_at("carol", t0).is_ok());
+
+        assert_eq!(limiter.bucket_count(), 3);
+    }
+}
