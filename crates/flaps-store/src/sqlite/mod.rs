@@ -1,5 +1,6 @@
 //! SQLite backend: pool construction, migrations and repository implementations.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
@@ -58,6 +59,20 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
 }
+
+/// Fixed decoy argon2id hash, derived once at process start with the exact same
+/// `Argon2::default()` parameters as real account hashes.
+///
+/// [`verify_credentials`] verifies the supplied password against this hash on
+/// the "unknown account" and "inactive account" branches, spending comparable
+/// CPU work to a real verification. This narrows the timing signal an
+/// attacker could otherwise use to enumerate valid usernames.
+///
+/// Best effort only: this equalizes hashing cost, not overall wall-clock
+/// time. Branch prediction, CPU caches, and allocator behavior can still leak
+/// a smaller signal. It is not a hard timing guarantee.
+static DUMMY_PASSWORD_HASH: LazyLock<String> =
+    LazyLock::new(|| hash_password(&generate_token()).unwrap_or_default());
 
 /// Generates a 32-byte URL-safe random token encoded as hex (64 chars).
 fn generate_token() -> String {
@@ -1339,10 +1354,14 @@ impl AccountRepository for SqliteStore {
         .await?;
 
         let Some((id, uname, hash, is_active)) = row else {
+            // Spend the same argon2 verification cost as a real account so that
+            // enumeration cannot be inferred from response timing (best effort).
+            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
             return Ok(None);
         };
 
         if is_active == 0 {
+            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
             return Ok(None);
         }
 
