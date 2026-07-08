@@ -3,6 +3,8 @@
 //! Uses axum's `oneshot` (no real network socket) with a `SqliteStore::in_memory` backend.
 //! All mutation routes require a valid session token; helpers call `POST /login` first.
 
+use std::sync::Arc;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
@@ -12,7 +14,11 @@ use flaps_domain::{
     Predicate, Project, ProjectKey, Segment, SegmentKey, SegmentMatch, ServeTarget, TargetingRule,
     ValueType, VariantKey, VariantValue, Variants,
 };
-use flaps_server::{bootstrap_admin, build_router, state::AppState};
+use flaps_server::{
+    bootstrap_admin, build_router,
+    rate_limit::{RateLimitConfig, RateLimiter},
+    state::AppState,
+};
 use flaps_store::{
     hash::KeyHasher,
     repository::{AuditLogRepository, FlagEnvConfigRepository},
@@ -1213,4 +1219,95 @@ async fn whoami_without_sdk_key_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: login_is_rate_limited_after_repeated_failures (#53)
+// ---------------------------------------------------------------------------
+
+async fn login_attempt(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+) -> axum::response::Response {
+    let login_body = serde_json::json!({ "username": username, "password": password });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&login_body).unwrap()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+#[tokio::test]
+async fn login_is_rate_limited_after_repeated_failures() {
+    let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
+    // Default AppState::new: login burst capacity is 5 (see state.rs).
+    let state = AppState::new(store);
+    let app = build_router(state);
+
+    // The rate limiter is keyed by username and checked before credentials
+    // are verified, so repeated failed attempts still consume the budget.
+    for attempt in 1..=5 {
+        let resp = login_attempt(&app, ADMIN_USER, "wrong-password").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {attempt} should be within the burst budget"
+        );
+    }
+
+    let resp = login_attempt(&app, ADMIN_USER, "wrong-password").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "attempt beyond the burst budget must be throttled"
+    );
+    let retry_after = resp
+        .headers()
+        .get("Retry-After")
+        .expect("429 response must carry a Retry-After header")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .expect("Retry-After must be a non-negative integer of seconds");
+    assert!(retry_after > 0, "Retry-After must suggest a positive wait");
+}
+
+// ---------------------------------------------------------------------------
+// Test 22: login_rate_limiter_disabled_never_throttles (#53)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn login_rate_limiter_disabled_never_throttles() {
+    let store = make_store().await;
+    bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
+        .await
+        .unwrap();
+    let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig {
+        enabled: true,
+        capacity: 60,
+        refill_per_second: 1.0,
+    }));
+    let login_rate_limiter = Arc::new(RateLimiter::disabled());
+    let state = AppState::with_config(
+        store,
+        rate_limiter,
+        login_rate_limiter,
+        std::time::Duration::from_secs(3600),
+    );
+    let app = build_router(state);
+
+    for attempt in 1..=10 {
+        let resp = login_attempt(&app, ADMIN_USER, "wrong-password").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "attempt {attempt} must never be throttled when the login limiter is disabled"
+        );
+    }
 }
