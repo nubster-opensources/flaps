@@ -78,6 +78,12 @@ pub struct AppState<S: Store> {
     pub cache: CompiledCache,
     /// Token-bucket rate limiter for the SDK endpoints.
     pub rate_limiter: Arc<RateLimiter>,
+    /// Token-bucket rate limiter for `POST /login`, keyed by username.
+    ///
+    /// Dedicated budget, separate from [`Self::rate_limiter`]: a stricter
+    /// throttle here reduces the value of brute-forcing a single account's
+    /// password without affecting the SDK read-path budget.
+    pub login_rate_limiter: Arc<RateLimiter>,
     /// TTL for newly minted sessions.
     pub session_ttl: Duration,
     /// Broadcast channel sender for ruleset change notifications.
@@ -92,7 +98,8 @@ pub struct AppState<S: Store> {
 impl<S: Store> AppState<S> {
     /// Builds a fresh app state around `store` with default configuration.
     ///
-    /// Defaults: rate limiter enabled (60 req/min per key), session TTL 24h.
+    /// Defaults: SDK rate limiter enabled (60 req/min per key), login rate
+    /// limiter enabled (burst 5, ~1 attempt / 10s per username), session TTL 24h.
     #[must_use]
     pub fn new(store: S) -> Self {
         let (events, _) = broadcast::channel(EVENTS_CHANNEL_CAPACITY);
@@ -104,6 +111,11 @@ impl<S: Store> AppState<S> {
                 capacity: 60,
                 refill_per_second: 1.0,
             })),
+            login_rate_limiter: Arc::new(RateLimiter::new(crate::rate_limit::RateLimitConfig {
+                enabled: true,
+                capacity: 5,
+                refill_per_second: 0.1,
+            })),
             session_ttl: DEFAULT_SESSION_TTL,
             events,
         }
@@ -111,12 +123,18 @@ impl<S: Store> AppState<S> {
 
     /// Builds app state with explicit configuration (used in tests and binary).
     #[must_use]
-    pub fn with_config(store: S, rate_limiter: Arc<RateLimiter>, session_ttl: Duration) -> Self {
+    pub fn with_config(
+        store: S,
+        rate_limiter: Arc<RateLimiter>,
+        login_rate_limiter: Arc<RateLimiter>,
+        session_ttl: Duration,
+    ) -> Self {
         let (events, _) = broadcast::channel(EVENTS_CHANNEL_CAPACITY);
         Self {
             store,
             cache: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter,
+            login_rate_limiter,
             session_ttl,
             events,
         }

@@ -27,10 +27,23 @@ pub struct LoginResponse {
 }
 
 /// `POST /login` - verify credentials and mint a session token.
+///
+/// # Errors
+/// - 429 too many requests (`Retry-After` header), throttled per username via
+///   [`AppState::login_rate_limiter`], before credentials are even checked.
 pub async fn post_login<S: Store>(
     State(state): State<AppState<S>>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    // Rate limit keyed by username, ahead of any store access: caps the rate
+    // of brute-force attempts against a single account.
+    state
+        .login_rate_limiter
+        .check(&body.username)
+        .map_err(|retry_after_seconds| ApiError::TooManyRequests {
+            retry_after_seconds,
+        })?;
+
     let account = state
         .store
         .verify_credentials(&body.username, &body.password)

@@ -168,7 +168,15 @@ async fn make_app_rate_limited() -> (axum::Router, String) {
             refill_per_second: 0.0,
         },
     ));
-    let state = AppState::with_config(store, rate_limiter, std::time::Duration::from_secs(3600));
+    // Login is unrelated to this SDK rate limit scenario: keep it disabled so
+    // the admin login performed by the test setup below is never throttled.
+    let login_rate_limiter = Arc::new(flaps_server::rate_limit::RateLimiter::disabled());
+    let state = AppState::with_config(
+        store,
+        rate_limiter,
+        login_rate_limiter,
+        std::time::Duration::from_secs(3600),
+    );
     let app = build_router(state.clone());
 
     let token = admin_login(&app).await;
