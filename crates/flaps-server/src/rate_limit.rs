@@ -21,6 +21,11 @@ struct Bucket {
     last_refill: Instant,
 }
 
+/// Hard ceiling on the number of live per-key buckets, to bound memory against
+/// an unauthenticated key-enumeration flood (see issue #75). Not exposed in
+/// `RateLimitConfig`: a sane default that avoids growing the public surface.
+const MAX_BUCKETS: usize = 100_000;
+
 /// In-memory token-bucket rate limiter keyed by an arbitrary string (e.g. SDK key prefix).
 ///
 /// When disabled (via [`RateLimiter::disabled`] or `enabled = false`), [`Self::check`]
@@ -29,6 +34,7 @@ pub struct RateLimiter {
     enabled: bool,
     capacity: f64,
     refill_per_second: f64,
+    max_buckets: usize,
     buckets: Mutex<HashMap<String, Bucket>>,
 }
 
@@ -40,6 +46,7 @@ impl RateLimiter {
             enabled: config.enabled,
             capacity: f64::from(config.capacity),
             refill_per_second: config.refill_per_second,
+            max_buckets: MAX_BUCKETS,
             buckets: Mutex::new(HashMap::new()),
         }
     }
@@ -52,6 +59,61 @@ impl RateLimiter {
             capacity: u32::MAX,
             refill_per_second: f64::MAX / 2.0,
         })
+    }
+
+    /// Builds a rate limiter with an injectable bucket ceiling, for deterministic
+    /// eviction tests (see issue #75).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_max_buckets(config: RateLimitConfig, max_buckets: usize) -> Self {
+        Self {
+            max_buckets,
+            ..Self::new(config)
+        }
+    }
+
+    /// Returns the current number of live buckets, for test assertions.
+    #[cfg(test)]
+    pub fn bucket_count(&self) -> usize {
+        #[allow(clippy::expect_used)]
+        self.buckets
+            .lock()
+            .expect("rate limiter mutex should not be poisoned")
+            .len()
+    }
+
+    /// Bounds the bucket map. First removes every bucket that has fully refilled
+    /// (indistinguishable from a bucket that does not exist), then, if still
+    /// above `max_buckets`, evicts the buckets closest to full (the least
+    /// active ones) until back under the ceiling.
+    ///
+    /// Reads token levels as of `now` without mutating surviving buckets: the
+    /// normal refill on their next `check` already accounts for elapsed time,
+    /// so mutating here would double-count it.
+    fn sweep(&self, buckets: &mut HashMap<String, Bucket>, now: Instant) {
+        let capacity = self.capacity;
+        let refill_per_second = self.refill_per_second;
+        let tokens_now = |bucket: &Bucket| {
+            let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+            (bucket.tokens + elapsed * refill_per_second).min(capacity)
+        };
+
+        buckets.retain(|_, bucket| tokens_now(bucket) < capacity);
+
+        if buckets.len() > self.max_buckets {
+            let mut by_tokens: Vec<(String, f64)> = buckets
+                .iter()
+                .map(|(key, bucket)| (key.clone(), tokens_now(bucket)))
+                .collect();
+            // Highest tokens_now first: those buckets are the least active
+            // (closest to full) and are evicted first.
+            by_tokens.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+            let excess = buckets.len() - self.max_buckets;
+            for (key, _) in by_tokens.into_iter().take(excess) {
+                buckets.remove(&key);
+            }
+        }
     }
 
     /// Checks and consumes one token for `key`.
@@ -83,7 +145,7 @@ impl RateLimiter {
         bucket.tokens = (bucket.tokens + elapsed * self.refill_per_second).min(self.capacity);
         bucket.last_refill = now;
 
-        if bucket.tokens >= 1.0 {
+        let result = if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
             Ok(())
         } else {
@@ -91,7 +153,13 @@ impl RateLimiter {
             let wait = (1.0 - bucket.tokens) / self.refill_per_second;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Err(wait.ceil() as u64)
+        };
+
+        if buckets.len() > self.max_buckets {
+            self.sweep(&mut buckets, now);
         }
+
+        result
     }
 
     /// Checks using an injectable `now` instant (for deterministic tests).
@@ -119,14 +187,20 @@ impl RateLimiter {
         bucket.tokens = (bucket.tokens + elapsed * self.refill_per_second).min(self.capacity);
         bucket.last_refill = now;
 
-        if bucket.tokens >= 1.0 {
+        let result = if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
             Ok(())
         } else {
             let wait = (1.0 - bucket.tokens) / self.refill_per_second;
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Err(wait.ceil() as u64)
+        };
+
+        if buckets.len() > self.max_buckets {
+            self.sweep(&mut buckets, now);
         }
+
+        result
     }
 }
 
