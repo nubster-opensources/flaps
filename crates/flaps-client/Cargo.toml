@@ -28,6 +28,9 @@ bytes = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
+flaps-server = { workspace = true }
+flaps-store = { workspace = true }
+flaps-domain = { workspace = true }
 
 [lints]
 workspace = true
