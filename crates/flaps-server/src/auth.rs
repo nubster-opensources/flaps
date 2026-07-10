@@ -1,7 +1,6 @@
 //! Authentication extractors for admin sessions and SDK keys.
 
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::{StatusCode, header, request::Parts},
 };
@@ -44,7 +43,6 @@ fn extract_bearer(parts: &Parts) -> Option<String> {
     Some(token.to_owned())
 }
 
-#[async_trait]
 impl<S: Store> FromRequestParts<AppState<S>> for AdminPrincipal {
     type Rejection = ApiError;
 
@@ -68,7 +66,6 @@ impl<S: Store> FromRequestParts<AppState<S>> for AdminPrincipal {
     }
 }
 
-#[async_trait]
 impl<S: Store> FromRequestParts<AppState<S>> for SdkKeyPrincipal {
     type Rejection = (StatusCode, ApiError);
 

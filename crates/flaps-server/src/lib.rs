@@ -43,65 +43,65 @@ pub fn build_router<S: Store>(state: AppState<S>) -> Router {
         .route("/login", post(post_login::<S>))
         // ---- Admin: CRUD (projects, environments, flags, segments, configs) ----
         .route("/projects", get(list_projects::<S>))
-        .route("/projects/:project", get(get_project::<S>))
-        .route("/projects/:project", put(put_project::<S>))
-        .route("/projects/:project", delete(delete_project::<S>))
+        .route("/projects/{project}", get(get_project::<S>))
+        .route("/projects/{project}", put(put_project::<S>))
+        .route("/projects/{project}", delete(delete_project::<S>))
         .route(
-            "/projects/:project/environments",
+            "/projects/{project}/environments",
             get(list_environments::<S>),
         )
         .route(
-            "/projects/:project/environments/:env",
+            "/projects/{project}/environments/{env}",
             get(get_environment::<S>),
         )
         .route(
-            "/projects/:project/environments/:env",
+            "/projects/{project}/environments/{env}",
             put(put_environment::<S>),
         )
         .route(
-            "/projects/:project/environments/:env",
+            "/projects/{project}/environments/{env}",
             delete(delete_environment::<S>),
         )
-        .route("/projects/:project/flags", get(list_flags::<S>))
-        .route("/projects/:project/flags/:flag", get(get_flag::<S>))
-        .route("/projects/:project/flags/:flag", put(put_flag::<S>))
-        .route("/projects/:project/flags/:flag", delete(delete_flag::<S>))
-        .route("/projects/:project/segments", get(list_segments::<S>))
+        .route("/projects/{project}/flags", get(list_flags::<S>))
+        .route("/projects/{project}/flags/{flag}", get(get_flag::<S>))
+        .route("/projects/{project}/flags/{flag}", put(put_flag::<S>))
+        .route("/projects/{project}/flags/{flag}", delete(delete_flag::<S>))
+        .route("/projects/{project}/segments", get(list_segments::<S>))
         .route(
-            "/projects/:project/segments/:segment",
+            "/projects/{project}/segments/{segment}",
             get(get_segment::<S>),
         )
         .route(
-            "/projects/:project/segments/:segment",
+            "/projects/{project}/segments/{segment}",
             put(put_segment::<S>),
         )
         .route(
-            "/projects/:project/segments/:segment",
+            "/projects/{project}/segments/{segment}",
             delete(delete_segment::<S>),
         )
         .route(
-            "/projects/:project/flags/:flag/environments/:env/config",
+            "/projects/{project}/flags/{flag}/environments/{env}/config",
             get(get_flag_env_config::<S>),
         )
         .route(
-            "/projects/:project/flags/:flag/environments/:env/config",
+            "/projects/{project}/flags/{flag}/environments/{env}/config",
             put(put_flag_env_config::<S>),
         )
         .route(
-            "/projects/:project/flags/:flag/environments/:env/config",
+            "/projects/{project}/flags/{flag}/environments/{env}/config",
             delete(delete_flag_env_config::<S>),
         )
         // ---- Admin: SDK key management ----
         .route(
-            "/projects/:project/environments/:env/keys",
+            "/projects/{project}/environments/{env}/keys",
             post(post_sdk_key::<S>),
         )
         .route(
-            "/projects/:project/environments/:env/keys",
+            "/projects/{project}/environments/{env}/keys",
             get(list_sdk_keys::<S>),
         )
         .route(
-            "/projects/:project/environments/:env/keys/:prefix",
+            "/projects/{project}/environments/{env}/keys/{prefix}",
             delete(delete_sdk_key::<S>),
         )
         // ---- SDK ----
@@ -109,7 +109,7 @@ pub fn build_router<S: Store>(state: AppState<S>) -> Router {
         // ---- OFREP v1 evaluation ----
         .route("/ofrep/v1/evaluate/flags", post(post_evaluate_flags::<S>))
         .route(
-            "/ofrep/v1/evaluate/flags/:key",
+            "/ofrep/v1/evaluate/flags/{key}",
             post(post_evaluate_flag::<S>),
         )
         // ---- Sync v1 (server-key only) ----

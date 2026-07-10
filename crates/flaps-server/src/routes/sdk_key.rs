@@ -39,7 +39,7 @@ pub struct CreateSdkKeyResponse {
     pub record: SdkKeyRecord,
 }
 
-/// `POST /projects/:project/environments/:env/keys`
+/// `POST /projects/{project}/environments/{env}/keys`
 pub async fn post_sdk_key<S: Store>(
     State(state): State<AppState<S>>,
     principal: AdminPrincipal,
@@ -76,7 +76,7 @@ pub async fn post_sdk_key<S: Store>(
     ))
 }
 
-/// `GET /projects/:project/environments/:env/keys`
+/// `GET /projects/{project}/environments/{env}/keys`
 pub async fn list_sdk_keys<S: Store>(
     State(state): State<AppState<S>>,
     _principal: AdminPrincipal,
@@ -100,7 +100,7 @@ pub async fn list_sdk_keys<S: Store>(
     Ok(Json(records))
 }
 
-/// `DELETE /projects/:project/environments/:env/keys/:prefix`
+/// `DELETE /projects/{project}/environments/{env}/keys/{prefix}`
 pub async fn delete_sdk_key<S: Store>(
     State(state): State<AppState<S>>,
     principal: AdminPrincipal,
