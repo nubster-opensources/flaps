@@ -33,6 +33,7 @@ tower = { workspace = true }
 http-body-util = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+syn = { version = "2", features = ["full", "visit"] }
 
 [lints]
 workspace = true
