@@ -210,10 +210,21 @@ fn put_config_req(
         .unwrap()
 }
 
+/// Builds an anonymous GET request (no `Authorization` header).
 fn get_req(uri: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
         .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Builds a GET request carrying a valid admin session token.
+fn get_authed_req(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap()
 }
@@ -255,14 +266,18 @@ async fn project_crud_round_trip() {
     // GET (200 + ETag)
     let resp = app
         .clone()
-        .oneshot(get_req("/projects/my-project"))
+        .oneshot(get_authed_req("/projects/my-project", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(resp.headers().contains_key(header::ETAG));
 
     // LIST
-    let resp = app.clone().oneshot(get_req("/projects")).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(get_authed_req("/projects", &token))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert!(json.as_array().is_some_and(|arr| arr.len() == 1));
@@ -278,7 +293,7 @@ async fn project_crud_round_trip() {
     // GET 404 after delete
     let resp = app
         .clone()
-        .oneshot(get_req("/projects/my-project"))
+        .oneshot(get_authed_req("/projects/my-project", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -313,7 +328,7 @@ async fn put_is_upsert() {
     // GET should show updated name
     let resp = app
         .clone()
-        .oneshot(get_req("/projects/upsert-project"))
+        .oneshot(get_authed_req("/projects/upsert-project", &token))
         .await
         .unwrap();
     let json = body_json(resp).await;
@@ -352,7 +367,7 @@ async fn get_returns_etag_header() {
 
     let resp1 = app
         .clone()
-        .oneshot(get_req("/projects/etag-project"))
+        .oneshot(get_authed_req("/projects/etag-project", &token))
         .await
         .unwrap();
     let etag1 = extract_etag(&resp1).expect("should have ETag");
@@ -362,7 +377,7 @@ async fn get_returns_etag_header() {
     // Second GET must return identical ETag
     let resp2 = app
         .clone()
-        .oneshot(get_req("/projects/etag-project"))
+        .oneshot(get_authed_req("/projects/etag-project", &token))
         .await
         .unwrap();
     let etag2 = extract_etag(&resp2).expect("should have ETag");
@@ -387,7 +402,7 @@ async fn stale_if_match_returns_412() {
     // GET to obtain ETag e1
     let resp = app
         .clone()
-        .oneshot(get_req("/projects/stale-project"))
+        .oneshot(get_authed_req("/projects/stale-project", &token))
         .await
         .unwrap();
     let etag1 = extract_etag(&resp).unwrap();
@@ -430,7 +445,7 @@ async fn matching_if_match_succeeds() {
 
     let resp = app
         .clone()
-        .oneshot(get_req("/projects/match-project"))
+        .oneshot(get_authed_req("/projects/match-project", &token))
         .await
         .unwrap();
     let current_etag = extract_etag(&resp).unwrap();
@@ -516,8 +531,9 @@ async fn invalid_rule_rejected_and_not_persisted() {
     // GET the config -> 404 (nothing was written)
     let resp = app
         .clone()
-        .oneshot(get_req(
+        .oneshot(get_authed_req(
             "/projects/invalid-project/flags/my-flag/environments/prod/config",
+            &token,
         ))
         .await
         .unwrap();
@@ -961,8 +977,11 @@ async fn login_succeeds_with_valid_credentials() {
     // token was obtained in make_authed_app; verify it is non-empty.
     assert!(!token.is_empty(), "login must return a non-empty token");
 
-    // Use it to verify it works on a read-only route (no auth needed but verify 200).
-    let resp = app.oneshot(get_req("/projects")).await.unwrap();
+    // Use it to verify it authorizes a read-only admin route.
+    let resp = app
+        .oneshot(get_authed_req("/projects", &token))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -1308,6 +1327,123 @@ async fn login_rate_limiter_disabled_never_throttles() {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "attempt {attempt} must never be throttled when the login limiter is disabled"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: admin_read_endpoints_require_admin_session (#82)
+// ---------------------------------------------------------------------------
+
+/// Covers all ten admin read handlers (list/get on projects, environments,
+/// flags, segments, flag-env-config, and list_sdk_keys): an anonymous request
+/// must be rejected with 401, and the same request presenting a valid admin
+/// session token must succeed with 200.
+#[tokio::test]
+async fn admin_read_endpoints_require_admin_session() {
+    let (app, token) = make_authed_app().await;
+
+    let project = bool_project("read-auth-project");
+    let env = bool_environment("read-auth-env");
+    let flag = bool_flag("read-auth-flag");
+    let segment = simple_segment("read-auth-segment");
+    let config = simple_config("on");
+
+    app.clone()
+        .oneshot(put_project_req("read-auth-project", &project, &token))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_env_req(
+            "read-auth-project",
+            "read-auth-env",
+            &env,
+            &token,
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_flag_req(
+            "read-auth-project",
+            "read-auth-flag",
+            &flag,
+            &token,
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_segment_req(
+            "read-auth-project",
+            "read-auth-segment",
+            &segment,
+            &token,
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_config_req(
+            "read-auth-project",
+            "read-auth-flag",
+            "read-auth-env",
+            &config,
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let create_key_body = serde_json::json!({ "kind": "server" });
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/projects/read-auth-project/environments/read-auth-env/keys")
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_vec(&create_key_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let read_uris = [
+        "/projects",
+        "/projects/read-auth-project",
+        "/projects/read-auth-project/environments",
+        "/projects/read-auth-project/environments/read-auth-env",
+        "/projects/read-auth-project/flags",
+        "/projects/read-auth-project/flags/read-auth-flag",
+        "/projects/read-auth-project/segments",
+        "/projects/read-auth-project/segments/read-auth-segment",
+        "/projects/read-auth-project/flags/read-auth-flag/environments/read-auth-env/config",
+        "/projects/read-auth-project/environments/read-auth-env/keys",
+    ];
+
+    for uri in read_uris {
+        let resp = app.clone().oneshot(get_req(uri)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "anonymous GET {uri} must be rejected with 401"
+        );
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("problem+json"),
+            "401 body for {uri} must be problem+json: {ct}"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(get_authed_req(uri, &token))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "authenticated GET {uri} must succeed with 200"
         );
     }
 }

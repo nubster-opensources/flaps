@@ -19,6 +19,7 @@ use crate::{
 /// `GET /projects/{project}/environments` -- list environments in a project.
 pub async fn list_environments<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path(project): Path<String>,
 ) -> Result<Json<Vec<Environment>>, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
@@ -33,6 +34,7 @@ pub async fn list_environments<S: Store>(
 /// `GET /projects/{project}/environments/{env}` -- fetch a single environment with ETag.
 pub async fn get_environment<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path((project, env)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;

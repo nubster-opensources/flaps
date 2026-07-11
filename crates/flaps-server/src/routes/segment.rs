@@ -19,6 +19,7 @@ use crate::{
 /// `GET /projects/{project}/segments` -- list all segments in a project.
 pub async fn list_segments<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path(project): Path<String>,
 ) -> Result<Json<Vec<Segment>>, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
@@ -33,6 +34,7 @@ pub async fn list_segments<S: Store>(
 /// `GET /projects/{project}/segments/{segment}` -- fetch a single segment with ETag.
 pub async fn get_segment<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path((project, segment)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
