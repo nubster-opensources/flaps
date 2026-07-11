@@ -106,6 +106,7 @@ fn bool_environment(key: &str) -> Environment {
         name: key.to_owned(),
         external_ref: None,
         managed_by: ManagedBy::Local,
+        metadata: flaps_domain::Metadata::new(),
     }
 }
 
@@ -124,6 +125,7 @@ fn bool_flag(key: &str) -> Flag {
             ],
         )
         .unwrap(),
+        metadata: flaps_domain::Metadata::new(),
     }
 }
 

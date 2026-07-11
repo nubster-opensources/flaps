@@ -148,12 +148,35 @@ async fn compile_env_with_overlay<S: Store>(
         .map(|(f, c)| FlagConfig { flag: f, config: c })
         .collect();
 
+    // Resolve the environment's own metadata (flag-set level), overlay-aware.
+    // This is a single extra read per environment being compiled (not per
+    // flag), so it does not introduce an N+1 query pattern: the overlay case
+    // (`UpsertEnvironment`) needs no read at all, and every other change kind
+    // reads the environment exactly once, same as the flags/segments reads
+    // above.
+    let environment_metadata = match change {
+        Change::UpsertEnvironment(env) if env.key == *environment => env.metadata.clone(),
+        _ => state
+            .store
+            .get_environment(project, environment)
+            .await
+            .map_err(ApiError::from)?
+            .map(|env| env.metadata)
+            .unwrap_or_default(),
+    };
+
     // Get previous compiled ruleset for version monotonicity.
     let cache = state.cache.read().await;
     let previous = cache.get(&(project.clone(), environment.clone()));
 
-    compile_environment(environment, &flag_config_refs, &segment_lookup, previous)
-        .map_err(ApiError::Validation)
+    compile_environment(
+        environment,
+        &flag_config_refs,
+        &segment_lookup,
+        &environment_metadata,
+        previous,
+    )
+    .map_err(ApiError::Validation)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +425,7 @@ mod tests {
             flag_type: FlagType::Release,
             value_type: ValueType::Boolean,
             variants,
+            metadata: flaps_domain::Metadata::new(),
         };
         store.upsert_flag("test", project, &flag).await.unwrap();
         flag
@@ -433,6 +457,7 @@ mod tests {
                     name: "Prod".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -486,6 +511,7 @@ mod tests {
                     name: "Staging".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await

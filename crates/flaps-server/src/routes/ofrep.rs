@@ -97,6 +97,23 @@ pub struct SingleSuccessResponse {
     /// The resolved variant key, omitted when no variant was resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// Flag-set and flag metadata merged (flag entries win on collision),
+    /// omitted entirely when empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, Value>>,
+}
+
+/// Converts a [`Resolution`]'s metadata to the OFREP DTO field: `None` when
+/// empty, `Some` otherwise. Reuses `flaps_eval::metadata_to_json` as the
+/// single source of truth for the JSON conversion.
+fn metadata_field(metadata: &flaps_eval::Metadata) -> Option<serde_json::Map<String, Value>> {
+    if metadata.is_empty() {
+        return None;
+    }
+    match flaps_eval::metadata_to_json(metadata) {
+        Value::Object(map) => Some(map),
+        _ => None,
+    }
 }
 
 /// Failed single flag evaluation response (OFREP evaluationFailure / flagNotFound).
@@ -268,6 +285,7 @@ fn evaluate_all_flags(flag_set: &FlagSet, ctx: &EvaluationContext) -> Vec<BulkFl
                 value: resolution.value,
                 reason: map_reason(resolution.reason),
                 variant: resolution.variant,
+                metadata: metadata_field(&resolution.metadata),
             }),
             Err(EvaluationError::FlagNotFound { flag_key: fk }) => {
                 BulkFlagEntry::Error(SingleErrorResponse {
@@ -377,6 +395,7 @@ pub async fn post_evaluate_flag<S: Store>(
                 value: resolution.value,
                 reason: map_reason(resolution.reason),
                 variant: resolution.variant,
+                metadata: metadata_field(&resolution.metadata),
             };
             (StatusCode::OK, Json(body)).into_response()
         }

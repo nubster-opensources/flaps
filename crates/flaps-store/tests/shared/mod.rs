@@ -5,8 +5,9 @@ use std::time::Duration;
 use flaps_domain::SdkKeyKind;
 use flaps_domain::{
     Environment, EnvironmentKey, ExternalRef, Flag, FlagEnvConfig, FlagKey, FlagType, ManagedBy,
-    MatchOperator, Predicate, Project, ProjectKey, Segment, SegmentKey, SegmentMatch, ServeTarget,
-    TargetingRule, ValueType, VariantKey, VariantValue, Variants, WeightedVariant,
+    MatchOperator, Metadata, MetadataValue, Predicate, Project, ProjectKey, Segment, SegmentKey,
+    SegmentMatch, ServeTarget, TargetingRule, ValueType, VariantKey, VariantValue, Variants,
+    WeightedVariant,
 };
 use flaps_store::{
     AuditRecord, KeyHasher, NewSdkKey, SdkKeyScope,
@@ -47,6 +48,7 @@ pub(crate) fn make_env(key: &str) -> Environment {
         name: format!("Env {key}"),
         external_ref: None,
         managed_by: ManagedBy::Local,
+        metadata: Metadata::new(),
     }
 }
 
@@ -58,6 +60,21 @@ pub(crate) fn make_env_with_ref(key: &str, ext_ref: &str) -> Environment {
         name: format!("Env {key}"),
         external_ref: Some(ExternalRef::new(ext_ref)),
         managed_by: ManagedBy::Federated,
+        metadata: Metadata::new(),
+    }
+}
+
+/// Builds an environment carrying flag-set-level metadata (#55 store tests).
+pub(crate) fn make_env_with_metadata(key: &str) -> Environment {
+    let mut metadata = Metadata::new();
+    metadata.insert("region".to_owned(), MetadataValue::String("eu-west".into()));
+    metadata.insert("critical".to_owned(), MetadataValue::Bool(true));
+    Environment {
+        key: EnvironmentKey::new(key).unwrap(),
+        name: format!("Env {key}"),
+        external_ref: None,
+        managed_by: ManagedBy::Local,
+        metadata,
     }
 }
 
@@ -77,6 +94,31 @@ pub(crate) fn make_flag(key: &str) -> Flag {
         flag_type: FlagType::Release,
         value_type: ValueType::Boolean,
         variants,
+        metadata: Metadata::new(),
+    }
+}
+
+/// Builds a flag carrying flag-level metadata (#55 store tests).
+pub(crate) fn make_flag_with_metadata(key: &str) -> Flag {
+    let variants = Variants::new(
+        ValueType::Boolean,
+        [
+            (VariantKey::new("on").unwrap(), VariantValue::Bool(true)),
+            (VariantKey::new("off").unwrap(), VariantValue::Bool(false)),
+        ],
+    )
+    .unwrap();
+    let mut metadata = Metadata::new();
+    metadata.insert("owner".to_owned(), MetadataValue::String("team-a".into()));
+    metadata.insert("priority".to_owned(), MetadataValue::Number(3.0));
+    Flag {
+        key: FlagKey::new(key).unwrap(),
+        name: format!("Flag {key}"),
+        description: Some("test flag".into()),
+        flag_type: FlagType::Release,
+        value_type: ValueType::Boolean,
+        variants,
+        metadata,
     }
 }
 
@@ -193,6 +235,9 @@ where
     // #50/#52 hardening follow-ups.
     test_create_sdk_key_is_audited(&store).await;
     test_list_sdk_keys_reports_revoked_at(&store).await;
+    // #55 flag and flag-set metadata.
+    test_flag_metadata_round_trips(&store).await;
+    test_environment_metadata_round_trips(&store).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1507,6 +1552,102 @@ async fn test_list_sdk_keys_reports_revoked_at<
     assert!(
         revoked.revoked_at.is_some(),
         "revoked key must have revoked_at populated"
+    );
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// #55 case 1: flag_metadata_round_trips
+// ---------------------------------------------------------------------------
+
+async fn test_flag_metadata_round_trips<S: ProjectRepository + FlagRepository>(store: &S) {
+    let proj = make_project("flag-metadata-proj");
+    store.upsert_project("tester", &proj).await.unwrap();
+
+    let flag = make_flag_with_metadata("metadata-flag");
+    store.upsert_flag("tester", &proj.key, &flag).await.unwrap();
+
+    let fetched = store.get_flag(&proj.key, &flag.key).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.metadata, flag.metadata,
+        "flag metadata must round-trip identically"
+    );
+    assert_eq!(
+        fetched.metadata.get("owner"),
+        Some(&MetadataValue::String("team-a".into()))
+    );
+    assert_eq!(
+        fetched.metadata.get("priority"),
+        Some(&MetadataValue::Number(3.0))
+    );
+
+    let listed = store.list_flags(&proj.key).await.unwrap();
+    let listed_flag = listed
+        .iter()
+        .find(|f| f.key == flag.key)
+        .expect("flag must be in list");
+    assert_eq!(listed_flag.metadata, flag.metadata);
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// #55 case 2: environment_metadata_round_trips
+// ---------------------------------------------------------------------------
+
+async fn test_environment_metadata_round_trips<S: ProjectRepository + EnvironmentRepository>(
+    store: &S,
+) {
+    let proj = make_project("env-metadata-proj");
+    store.upsert_project("tester", &proj).await.unwrap();
+
+    let env = make_env_with_metadata("metadata-env");
+    store
+        .upsert_environment("tester", &proj.key, &env)
+        .await
+        .unwrap();
+
+    let fetched = store
+        .get_environment(&proj.key, &env.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fetched.metadata, env.metadata,
+        "environment metadata must round-trip identically"
+    );
+    assert_eq!(
+        fetched.metadata.get("region"),
+        Some(&MetadataValue::String("eu-west".into()))
+    );
+    assert_eq!(
+        fetched.metadata.get("critical"),
+        Some(&MetadataValue::Bool(true))
+    );
+
+    let listed = store.list_environments(&proj.key).await.unwrap();
+    let listed_env = listed
+        .iter()
+        .find(|e| e.key == env.key)
+        .expect("environment must be in list");
+    assert_eq!(listed_env.metadata, env.metadata);
+
+    // A flag/environment created without metadata must round-trip to an
+    // empty map, proving the migration default ('{}') is not NULL.
+    let plain_env = make_env("plain-env");
+    store
+        .upsert_environment("tester", &proj.key, &plain_env)
+        .await
+        .unwrap();
+    let fetched_plain = store
+        .get_environment(&proj.key, &plain_env.key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        fetched_plain.metadata.is_empty(),
+        "environment without metadata must round-trip to an empty map"
     );
 
     store.delete_project("tester", &proj.key).await.unwrap();

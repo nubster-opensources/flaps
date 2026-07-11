@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, HashSet};
 use sha2::{Digest, Sha256};
 
 use flaps_domain::key::{EnvironmentKey, SegmentKey};
+use flaps_domain::metadata::Metadata as DomainMetadata;
 use flaps_eval::FlagSet;
 
 pub use error::CompileError;
@@ -56,20 +57,26 @@ pub fn compile_environment(
     environment: &EnvironmentKey,
     flags: &[FlagConfig<'_>],
     segments: &Segments<'_>,
+    environment_metadata: &DomainMetadata,
     previous: Option<&CompiledRuleset>,
 ) -> Result<CompiledRuleset, CompileError> {
     // Build the flag map; BTreeMap guarantees stable key ordering.
     let mut flag_map = BTreeMap::new();
 
     for fc in flags {
-        let compiled =
-            flag_compiler::compile_flag(&fc.flag.key, &fc.flag.variants, fc.config, segments)?;
+        let compiled = flag_compiler::compile_flag(
+            &fc.flag.key,
+            &fc.flag.variants,
+            fc.config,
+            segments,
+            &fc.flag.metadata,
+        )?;
         flag_map.insert(fc.flag.key.as_str().to_owned(), compiled);
     }
 
     let flag_set = FlagSet {
         flags: flag_map,
-        metadata: BTreeMap::new(),
+        metadata: flag_compiler::compile_metadata(environment_metadata),
     };
 
     let document = flag_set.to_json();
@@ -179,6 +186,7 @@ mod tests {
                 ],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         }
     }
 
@@ -197,6 +205,7 @@ mod tests {
                 ],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         }
     }
 
@@ -236,6 +245,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "boolean flag should compile: {result:?}");
@@ -260,6 +270,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok());
@@ -284,6 +295,7 @@ mod tests {
                 [(vk("high"), VariantValue::Number(1.0))],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         };
         let config = simple_config("high");
         let env = ek("prod");
@@ -294,6 +306,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok());
@@ -317,6 +330,7 @@ mod tests {
                 [(vk("v1"), VariantValue::Json(serde_json::json!({"key": 1})))],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         };
         let config = simple_config("v1");
         let env = ek("prod");
@@ -327,6 +341,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok());
@@ -346,6 +361,7 @@ mod tests {
                 [(vk("v1"), VariantValue::Json(serde_json::json!([1, 2, 3])))],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         };
         let config = simple_config("v1");
         let env = ek("prod");
@@ -356,6 +372,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -380,6 +397,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -418,6 +436,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -440,6 +459,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -484,6 +504,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -528,6 +549,7 @@ mod tests {
                 config: &config,
             }],
             &segment_lookup,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -558,6 +580,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -593,6 +616,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -626,6 +650,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -657,6 +682,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -687,6 +713,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -722,6 +749,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -770,6 +798,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         );
         assert!(result.is_ok(), "{result:?}");
@@ -804,6 +833,7 @@ mod tests {
                 config: &config_prod,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -814,6 +844,7 @@ mod tests {
                 config: &config_staging,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -839,6 +870,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -849,6 +881,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -873,6 +906,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -892,6 +926,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -902,6 +937,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             Some(&first),
         )
         .unwrap();
@@ -924,6 +960,7 @@ mod tests {
                 config: &config_v1,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -934,6 +971,7 @@ mod tests {
                 config: &config_v2,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             Some(&first),
         )
         .unwrap();
@@ -1007,6 +1045,7 @@ mod tests {
                 [(vk("bad"), VariantValue::Number(f64::NAN))],
             )
             .unwrap(),
+            metadata: flaps_domain::metadata::Metadata::new(),
         };
         let config = FlagEnvConfig {
             enabled: true,
@@ -1021,6 +1060,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -1062,6 +1102,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -1101,6 +1142,7 @@ mod tests {
                 config: &config,
             }],
             &segs,
+            &DomainMetadata::new(),
             None,
         )
         .unwrap();
@@ -1130,6 +1172,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -1154,6 +1197,7 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(
@@ -1188,11 +1232,126 @@ mod tests {
                 config: &config,
             }],
             &no_segments(),
+            &DomainMetadata::new(),
             None,
         );
         assert!(
             matches!(result, Err(CompileError::UnknownVariant { .. })),
             "expected UnknownVariant for rollout, got {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // 12. Metadata propagation (#55): flag-level and flag-set-level
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn flag_metadata_is_carried_into_the_compiled_document() {
+        let mut flag = bool_flag("my-flag");
+        flag.metadata.insert(
+            "owner".to_owned(),
+            flaps_domain::metadata::MetadataValue::String("team-a".into()),
+        );
+        let config = simple_config("on");
+        let env = ek("prod");
+        let ruleset = compile_environment(
+            &env,
+            &[FlagConfig {
+                flag: &flag,
+                config: &config,
+            }],
+            &no_segments(),
+            &DomainMetadata::new(),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            ruleset.document.contains("\"owner\""),
+            "compiled document should carry flag metadata: {}",
+            ruleset.document
+        );
+        let parsed = FlagSet::from_json(&ruleset.document).unwrap();
+        let compiled_flag = &parsed.flags["my-flag"];
+        assert_eq!(
+            compiled_flag.metadata.get("owner"),
+            Some(&flaps_eval::MetadataValue::String("team-a".into()))
+        );
+    }
+
+    #[test]
+    fn environment_metadata_is_carried_into_flag_set_metadata() {
+        let flag = bool_flag("my-flag");
+        let config = simple_config("on");
+        let env = ek("prod");
+        let mut environment_metadata = DomainMetadata::new();
+        environment_metadata.insert(
+            "region".to_owned(),
+            flaps_domain::metadata::MetadataValue::String("eu-west".into()),
+        );
+
+        let ruleset = compile_environment(
+            &env,
+            &[FlagConfig {
+                flag: &flag,
+                config: &config,
+            }],
+            &no_segments(),
+            &environment_metadata,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            ruleset.document.contains("\"region\""),
+            "compiled document should carry environment metadata: {}",
+            ruleset.document
+        );
+        let parsed = FlagSet::from_json(&ruleset.document).unwrap();
+        assert_eq!(
+            parsed.metadata.get("region"),
+            Some(&flaps_eval::MetadataValue::String("eu-west".into())),
+            "FlagSet::from_json must relit the flag-set metadata (round-trip)"
+        );
+    }
+
+    #[test]
+    fn flag_metadata_and_environment_metadata_coexist_at_their_own_level() {
+        let mut flag = bool_flag("my-flag");
+        flag.metadata.insert(
+            "team".to_owned(),
+            flaps_domain::metadata::MetadataValue::String("flag-owner".into()),
+        );
+        let config = simple_config("on");
+        let env = ek("prod");
+        let mut environment_metadata = DomainMetadata::new();
+        environment_metadata.insert(
+            "team".to_owned(),
+            flaps_domain::metadata::MetadataValue::String("flagset-owner".into()),
+        );
+
+        let ruleset = compile_environment(
+            &env,
+            &[FlagConfig {
+                flag: &flag,
+                config: &config,
+            }],
+            &no_segments(),
+            &environment_metadata,
+            None,
+        )
+        .unwrap();
+
+        let parsed = FlagSet::from_json(&ruleset.document).unwrap();
+        // Both levels keep their own metadata in the compiled document; the
+        // engine merges them at evaluation time (flag wins), not the compiler.
+        assert_eq!(
+            parsed.flags["my-flag"].metadata.get("team"),
+            Some(&flaps_eval::MetadataValue::String("flag-owner".into()))
+        );
+        assert_eq!(
+            parsed.metadata.get("team"),
+            Some(&flaps_eval::MetadataValue::String("flagset-owner".into()))
         );
     }
 }

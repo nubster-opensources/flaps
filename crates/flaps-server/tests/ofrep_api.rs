@@ -242,6 +242,103 @@ async fn create_environment(app: &axum::Router, proj: &str, env: &str, token: &s
     );
 }
 
+/// Same as [`create_environment`] but with an explicit `metadata` map (#55).
+async fn create_environment_with_metadata(
+    app: &axum::Router,
+    proj: &str,
+    env: &str,
+    token: &str,
+    metadata: serde_json::Value,
+) {
+    let body = serde_json::json!({
+        "key": env,
+        "name": env,
+        "managed_by": "local",
+        "metadata": metadata,
+    });
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/projects/{proj}/environments/{env}"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create environment with metadata must succeed: {}",
+        resp.status()
+    );
+}
+
+/// Creates a boolean flag (`on`/`off`, default `on`) with an explicit
+/// `metadata` map (#55).
+async fn create_flag_with_metadata(
+    app: &axum::Router,
+    proj: &str,
+    flag: &str,
+    token: &str,
+    metadata: serde_json::Value,
+) {
+    let body = serde_json::json!({
+        "key": flag,
+        "name": flag,
+        "description": null,
+        "flag_type": "release",
+        "value_type": "boolean",
+        "variants": {
+            "value_type": "boolean",
+            "entries": { "on": { "bool": true }, "off": { "bool": false } }
+        },
+        "metadata": metadata,
+    });
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!("/projects/{proj}/flags/{flag}"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create flag with metadata must succeed: {}",
+        resp.status()
+    );
+}
+
+/// Wires a flag into an environment with a fixed default variant, triggering
+/// the real compile-and-install path (no fake ruleset injection).
+async fn create_flag_env_config(
+    app: &axum::Router,
+    proj: &str,
+    flag: &str,
+    env: &str,
+    token: &str,
+    default_variant: &str,
+) {
+    let body = serde_json::json!({
+        "enabled": true,
+        "rules": [],
+        "default_rule": { "fixed": default_variant },
+    });
+    let req = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/projects/{proj}/flags/{flag}/environments/{env}/config"
+        ))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create flag_env_config must succeed: {}",
+        resp.status()
+    );
+}
+
 /// Creates an SDK key and returns the raw key secret (returned once at creation).
 async fn create_sdk_key(app: &axum::Router, proj: &str, env: &str, token: &str) -> String {
     let body = serde_json::json!({"kind": "server"});
@@ -661,4 +758,123 @@ async fn bulk_atomicity_concurrent_cache_swap() {
     }
 
     swap_task.await.expect("swap task must not panic");
+}
+
+// ---------------------------------------------------------------------------
+// Metadata fusion tests (#55): flag and flag-set metadata, flag wins
+// ---------------------------------------------------------------------------
+
+/// End-to-end (admin seed -> real compile -> OFREP): an environment carrying
+/// flag-set metadata and a flag carrying flag metadata, with one colliding
+/// key (`team`) and one disjoint key on each side. Single evaluation must
+/// return the merged metadata with the flag's value winning on collision.
+#[tokio::test]
+async fn single_evaluation_merges_flag_and_flag_set_metadata_flag_wins() {
+    let store = make_store().await;
+    flaps_server::bootstrap_admin(&store, "admin", "admin-pass")
+        .await
+        .expect("bootstrap");
+    let state = AppState::new(store);
+    let app = build_router(state.clone());
+
+    let token = admin_login(&app).await;
+    create_project(&app, "meta-proj", &token).await;
+    create_environment_with_metadata(
+        &app,
+        "meta-proj",
+        "meta-env",
+        &token,
+        serde_json::json!({"team": "flagset-owner", "region": "eu-west"}),
+    )
+    .await;
+    create_flag_with_metadata(
+        &app,
+        "meta-proj",
+        "meta-flag",
+        &token,
+        serde_json::json!({"team": "flag-owner", "priority": 3}),
+    )
+    .await;
+    create_flag_env_config(&app, "meta-proj", "meta-flag", "meta-env", &token, "on").await;
+    let sdk_key = create_sdk_key(&app, "meta-proj", "meta-env", &token).await;
+
+    let ctx = serde_json::json!({"context": {}});
+    let resp = app
+        .oneshot(ofrep_single_req("meta-flag", &sdk_key, &ctx))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+
+    // Flag wins on the colliding "team" key.
+    assert_eq!(json["metadata"]["team"].as_str(), Some("flag-owner"));
+    // Disjoint keys from both levels are present.
+    assert_eq!(json["metadata"]["region"].as_str(), Some("eu-west"));
+    assert_eq!(json["metadata"]["priority"], serde_json::json!(3));
+}
+
+/// Same fixture as the single-flag test above, exercised through the bulk
+/// evaluation endpoint: `BulkFlagEntry::Success` wraps `SingleSuccessResponse`,
+/// so the same DTO change covers both endpoints.
+#[tokio::test]
+async fn bulk_evaluation_merges_flag_and_flag_set_metadata_flag_wins() {
+    let store = make_store().await;
+    flaps_server::bootstrap_admin(&store, "admin", "admin-pass")
+        .await
+        .expect("bootstrap");
+    let state = AppState::new(store);
+    let app = build_router(state.clone());
+
+    let token = admin_login(&app).await;
+    create_project(&app, "meta-proj", &token).await;
+    create_environment_with_metadata(
+        &app,
+        "meta-proj",
+        "meta-env",
+        &token,
+        serde_json::json!({"team": "flagset-owner", "region": "eu-west"}),
+    )
+    .await;
+    create_flag_with_metadata(
+        &app,
+        "meta-proj",
+        "meta-flag",
+        &token,
+        serde_json::json!({"team": "flag-owner", "priority": 3}),
+    )
+    .await;
+    create_flag_env_config(&app, "meta-proj", "meta-flag", "meta-env", &token, "on").await;
+    let sdk_key = create_sdk_key(&app, "meta-proj", "meta-env", &token).await;
+
+    let ctx = serde_json::json!({"context": {}});
+    let resp = app.oneshot(ofrep_bulk_req(&sdk_key, &ctx)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let flags = json["flags"].as_array().unwrap();
+    let entry = flags
+        .iter()
+        .find(|f| f["key"] == "meta-flag")
+        .expect("meta-flag must be in bulk response");
+
+    assert_eq!(entry["metadata"]["team"].as_str(), Some("flag-owner"));
+    assert_eq!(entry["metadata"]["region"].as_str(), Some("eu-west"));
+    assert_eq!(entry["metadata"]["priority"], serde_json::json!(3));
+}
+
+/// A flag and environment with no metadata at all must omit the `metadata`
+/// field entirely from the OFREP response, not emit an empty object.
+#[tokio::test]
+async fn single_evaluation_omits_metadata_field_when_empty() {
+    let (app, sdk_key) = make_app_with_ruleset(FLAGD_DOC).await;
+    let ctx = serde_json::json!({"context": {}});
+    let resp = app
+        .oneshot(ofrep_single_req("feature-x", &sdk_key, &ctx))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json.get("metadata").is_none(),
+        "metadata field must be omitted when empty, got: {json}"
+    );
 }

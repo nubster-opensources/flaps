@@ -5,11 +5,32 @@ use std::collections::BTreeMap;
 use flaps_domain::{
     flag_env_config::{FlagEnvConfig, ServeTarget},
     key::{FlagKey, SegmentKey},
+    metadata::{Metadata as DomainMetadata, MetadataValue as DomainMetadataValue},
     variant::{ValueType, Variants as DomainVariants},
 };
-use flaps_eval::{Bucket, Flag, Literal, Metadata, Rule, State, Variants};
+use flaps_eval::{Bucket, Flag, Literal, Metadata, MetadataValue, Rule, State, Variants};
 
 use crate::{error::CompileError, input::Segments, segment_compiler::compile_segment_match};
+
+/// Converts a single domain metadata value to its `flaps-eval` counterpart.
+///
+/// The two types are structurally identical (`Bool`/`String`/`Number`); this
+/// is a plain 1:1 mapping, not a projection.
+fn compile_metadata_value(value: &DomainMetadataValue) -> MetadataValue {
+    match value {
+        DomainMetadataValue::Bool(b) => MetadataValue::Bool(*b),
+        DomainMetadataValue::String(s) => MetadataValue::String(s.clone()),
+        DomainMetadataValue::Number(n) => MetadataValue::Number(*n),
+    }
+}
+
+/// Converts a domain [`DomainMetadata`] map to its `flaps-eval` [`Metadata`] counterpart.
+pub(crate) fn compile_metadata(metadata: &DomainMetadata) -> Metadata {
+    metadata
+        .iter()
+        .map(|(k, v)| (k.clone(), compile_metadata_value(v)))
+        .collect()
+}
 
 /// Serialized form of a single variant entry as produced by `serde_json`.
 ///
@@ -272,6 +293,7 @@ pub(crate) fn compile_flag(
     domain_variants: &DomainVariants,
     config: &FlagEnvConfig,
     segments: &Segments<'_>,
+    flag_metadata: &DomainMetadata,
 ) -> Result<Flag, CompileError> {
     let flag_str = flag_key.as_str();
 
@@ -296,6 +318,6 @@ pub(crate) fn compile_flag(
         variants,
         default_variant,
         targeting,
-        metadata: Metadata::new(),
+        metadata: compile_metadata(flag_metadata),
     })
 }
