@@ -19,6 +19,7 @@ use crate::{
 /// `GET /projects` -- list all projects.
 pub async fn list_projects<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
 ) -> Result<Json<Vec<Project>>, ApiError> {
     let projects = state.store.list_projects().await.map_err(ApiError::from)?;
     Ok(Json(projects))
@@ -27,6 +28,7 @@ pub async fn list_projects<S: Store>(
 /// `GET /projects/{project}` -- fetch a single project with ETag.
 pub async fn get_project<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path(key): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;

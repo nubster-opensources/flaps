@@ -19,6 +19,7 @@ use crate::{
 /// `GET /projects/{project}/flags/{flag}/environments/{env}/config`
 pub async fn get_flag_env_config<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path((project, flag, env)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;

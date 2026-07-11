@@ -19,6 +19,7 @@ use crate::{
 /// `GET /projects/{project}/flags` -- list all flags in a project.
 pub async fn list_flags<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path(project): Path<String>,
 ) -> Result<Json<Vec<Flag>>, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
@@ -33,6 +34,7 @@ pub async fn list_flags<S: Store>(
 /// `GET /projects/{project}/flags/{flag}` -- fetch a single flag with ETag.
 pub async fn get_flag<S: Store>(
     State(state): State<AppState<S>>,
+    _principal: AdminPrincipal,
     Path((project, flag)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
