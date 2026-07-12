@@ -1,4 +1,4 @@
-//! Provider freshness metrics exposed via [`FlapsProvider::status`].
+//! Provider freshness metrics exposed via [`crate::provider::FlapsProvider::sync_status`].
 
 use std::time::{Duration, Instant};
 
@@ -19,8 +19,8 @@ pub(crate) struct SyncState {
 
 /// Snapshot of provider freshness metrics.
 ///
-/// Returned by [`FlapsProvider::status`] and computed from the internal
-/// [`SyncState`] at call time. All fields are `None` until the first
+/// Returned by [`crate::provider::FlapsProvider::sync_status`] and computed from the
+/// internal `SyncState` at call time. All fields are `None` until the first
 /// successful sync completes.
 #[derive(Debug, Clone)]
 pub struct SyncStatus {

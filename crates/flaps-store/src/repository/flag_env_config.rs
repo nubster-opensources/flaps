@@ -1,4 +1,4 @@
-//! Repository trait for the [`FlagEnvConfig`](flaps_domain::FlagEnvConfig) aggregate.
+//! Repository trait for the [`FlagEnvConfig`] aggregate.
 
 use std::future::Future;
 
