@@ -8,7 +8,7 @@ use crate::{account::AccountRecord, error::StoreResult};
 pub trait AccountRepository: Send + Sync {
     /// Creates a new account with `username` and `password` (argon2id-hashed).
     ///
-    /// Returns a [`StoreError::Conflict`] if the username is already taken.
+    /// Returns a [`crate::error::StoreError::Conflict`] if the username is already taken.
     fn create_account(
         &self,
         actor: &str,

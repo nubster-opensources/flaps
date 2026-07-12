@@ -119,3 +119,16 @@ jobs:
           key: cargo-audit
       - run: cargo install --locked cargo-audit
       - run: cargo audit
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc
+      - run: cargo doc --workspace --all-features --no-deps
