@@ -1,6 +1,6 @@
 # Contributing to Flaps
 
-Flaps is currently in **pre-alpha**. The repository is public from day one to make the design discussion visible, but the public API is not stable yet. The information below describes the conventions that will apply once the project opens for contributions.
+Flaps is currently in **pre-alpha**. The repository is public from day one to make the design discussion visible, but the public API is not stable yet. Contributions are welcome; the information below describes the conventions that apply.
 
 ## Conventions
 
@@ -13,7 +13,7 @@ Flaps follows the Nubster general coding standards documented in [nubster-docs](
 - **English everywhere**, rustdoc comments, public types, commit messages, issues and project documentation are all written in English.
 - **No vendor lock-in**, every external integration (auth, events, audit) goes through an open standard (OIDC, SCIM, CloudEvents, HMAC). Nubster Identity and Hexeract are the default convenient options, never a hard dependency.
 
-## Local setup (when the project opens)
+## Local setup
 
 ```bash
 # Pin the Rust toolchain via rustup

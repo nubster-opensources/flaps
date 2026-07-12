@@ -72,6 +72,7 @@ admin bootstrap, SDK key creation, in-process provider setup).
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
+- [HTTP API reference](docs/spec/api-v1.md)
 - [Architecture](docs/design/architecture.md)
 - [Interoperability](docs/design/interop.md)
 - [Roadmap](docs/explanation/roadmap.md)
@@ -92,6 +93,7 @@ admin bootstrap, SDK key creation, in-process provider setup).
 | `flaps-client` | OpenFeature in-process provider for Rust: HTTP sync, SSE notifications, local evaluation |
 | `flaps-server` | Admin REST API, OFREP endpoints, ruleset sync and SSE distribution |
 | `flapsd` | Server daemon: TOML configuration, first-admin bootstrap, wiring |
+| `xtask` | Repository tooling: release pre-flight checks (not published) |
 
 ## Contributing
 
