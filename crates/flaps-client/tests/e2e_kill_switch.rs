@@ -125,6 +125,7 @@ async fn seed_active_boolean_flag(
                 name: "e2e environment".into(),
                 external_ref: None,
                 managed_by: ManagedBy::Local,
+                metadata: flaps_domain::Metadata::new(),
             },
         )
         .await
@@ -150,6 +151,7 @@ async fn seed_active_boolean_flag(
                 flag_type: FlagType::Ops,
                 value_type: ValueType::Boolean,
                 variants,
+                metadata: flaps_domain::Metadata::new(),
             },
         )
         .await

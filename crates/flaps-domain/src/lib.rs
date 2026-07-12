@@ -19,6 +19,7 @@
 //! | [`segment`] | [`Segment`], [`SegmentMatch`], [`Predicate`], [`MatchOperator`] |
 //! | [`sdk_key`] | [`SdkKey`], [`SdkKeyKind`] |
 //! | [`audit`] | [`AuditEntry`] |
+//! | [`metadata`] | [`Metadata`], [`MetadataValue`] |
 
 pub mod audit;
 pub mod environment;
@@ -27,6 +28,7 @@ pub mod federation;
 pub mod flag;
 pub mod flag_env_config;
 pub mod key;
+pub mod metadata;
 pub mod project;
 pub mod sdk_key;
 pub mod segment;
@@ -40,6 +42,7 @@ pub use federation::{ExternalRef, ManagedBy};
 pub use flag::{Flag, FlagType};
 pub use flag_env_config::{FlagEnvConfig, ServeTarget, TargetingRule, WeightedVariant};
 pub use key::{EnvironmentKey, FlagKey, ProjectKey, SegmentKey, VariantKey};
+pub use metadata::{Metadata, MetadataValue};
 pub use project::Project;
 pub use sdk_key::{SdkKey, SdkKeyKind};
 pub use segment::{MatchOperator, Predicate, Segment, SegmentMatch};

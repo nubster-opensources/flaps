@@ -253,6 +253,7 @@ mod tests {
                     name: "Prod".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -315,6 +316,7 @@ mod tests {
                     name: "Good".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -332,6 +334,7 @@ mod tests {
                     name: "Corrupt".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -360,6 +363,7 @@ mod tests {
                     flag_type: FlagType::Release,
                     value_type: ValueType::Boolean,
                     variants,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -541,6 +545,7 @@ mod tests {
                     name: "Boot env".into(),
                     external_ref: None,
                     managed_by: ManagedBy::Local,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await
@@ -569,6 +574,7 @@ mod tests {
                     flag_type: FlagType::Release,
                     value_type: ValueType::Boolean,
                     variants,
+                    metadata: flaps_domain::Metadata::new(),
                 },
             )
             .await

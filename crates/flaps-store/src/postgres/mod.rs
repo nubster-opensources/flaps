@@ -99,13 +99,14 @@ fn secs_to_rfc3339(secs: u64) -> String {
 // ---------------------------------------------------------------------------
 
 type ProjectRow = (String, String, Option<String>, Option<String>, String);
-type EnvRow = (String, String, Option<String>, String);
+type EnvRow = (String, String, Option<String>, String, serde_json::Value);
 type FlagRow = (
     String,
     String,
     Option<String>,
     String,
     String,
+    serde_json::Value,
     serde_json::Value,
 );
 type SegmentRow = (String, String, serde_json::Value);
@@ -159,12 +160,14 @@ fn row_to_environment(
     name: String,
     ext_ref: Option<String>,
     mb: &str,
+    metadata_json: serde_json::Value,
 ) -> StoreResult<Environment> {
     Ok(Environment {
         key: EnvironmentKey::new(k).map_err(|e| domain_key_err(&e))?,
         name,
         external_ref: ext_ref.map(ExternalRef::new),
         managed_by: managed_by_from_str(mb)?,
+        metadata: serde_json::from_value(metadata_json)?,
     })
 }
 
@@ -196,14 +199,14 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let row: Option<EnvRow> = sqlx::query_as(
-        "SELECT key, name, external_ref, managed_by FROM environments WHERE project_key = $1 AND key = $2",
+        "SELECT key, name, external_ref, managed_by, metadata_json FROM environments WHERE project_key = $1 AND key = $2",
     )
     .bind(project.as_str())
     .bind(key.as_str())
     .fetch_optional(executor)
     .await?;
 
-    row.map(|(k, name, ext_ref, mb)| row_to_environment(k, name, ext_ref, &mb))
+    row.map(|(k, name, ext_ref, mb, meta)| row_to_environment(k, name, ext_ref, &mb, meta))
         .transpose()
 }
 
@@ -217,14 +220,14 @@ where
 {
     let row: Option<FlagRow> =
         sqlx::query_as(
-            "SELECT key, name, description, flag_type, value_type, variants_json FROM flags WHERE project_key = $1 AND key = $2",
+            "SELECT key, name, description, flag_type, value_type, variants_json, metadata_json FROM flags WHERE project_key = $1 AND key = $2",
         )
         .bind(project.as_str())
         .bind(key.as_str())
         .fetch_optional(executor)
         .await?;
 
-    row.map(|(k, name, desc, ft, vt, vj)| {
+    row.map(|(k, name, desc, ft, vt, vj, mj)| {
         Ok(Flag {
             key: FlagKey::new(k).map_err(|e| domain_key_err(&e))?,
             name,
@@ -232,6 +235,7 @@ where
             flag_type: serde_json::from_str(&format!(r#""{ft}""#))?,
             value_type: serde_json::from_str(&format!(r#""{vt}""#))?,
             variants: serde_json::from_value(vj)?,
+            metadata: serde_json::from_value(mj)?,
         })
     })
     .transpose()
@@ -338,22 +342,25 @@ where
 {
     let external_ref = env.external_ref.as_ref().map(|r| r.as_str().to_owned());
     let managed_by = managed_by_str(env.managed_by);
+    let metadata_json: serde_json::Value = serde_json::to_value(&env.metadata)?;
     let now = crate::clock::now_rfc3339();
 
     let result = sqlx::query(
-        r"INSERT INTO environments (project_key, key, name, external_ref, managed_by, created_at, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        r"INSERT INTO environments (project_key, key, name, external_ref, managed_by, metadata_json, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           ON CONFLICT(project_key, key) DO UPDATE SET
-              name         = EXCLUDED.name,
-              external_ref = EXCLUDED.external_ref,
-              managed_by   = EXCLUDED.managed_by,
-              updated_at   = EXCLUDED.updated_at",
+              name          = EXCLUDED.name,
+              external_ref  = EXCLUDED.external_ref,
+              managed_by    = EXCLUDED.managed_by,
+              metadata_json = EXCLUDED.metadata_json,
+              updated_at    = EXCLUDED.updated_at",
     )
     .bind(project.as_str())
     .bind(env.key.as_str())
     .bind(&env.name)
     .bind(external_ref)
     .bind(managed_by)
+    .bind(metadata_json)
     .bind(&now)
     .bind(&now)
     .execute(executor)
@@ -378,17 +385,19 @@ where
     let variants_json: serde_json::Value = serde_json::to_value(&flag.variants)?;
     let flag_type = serde_json::to_string(&flag.flag_type)?;
     let value_type = serde_json::to_string(&flag.value_type)?;
+    let metadata_json: serde_json::Value = serde_json::to_value(&flag.metadata)?;
     let now = crate::clock::now_rfc3339();
 
     sqlx::query(
-        r"INSERT INTO flags (project_key, key, name, description, flag_type, value_type, variants_json, created_at, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        r"INSERT INTO flags (project_key, key, name, description, flag_type, value_type, variants_json, metadata_json, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
           ON CONFLICT(project_key, key) DO UPDATE SET
               name          = EXCLUDED.name,
               description   = EXCLUDED.description,
               flag_type     = EXCLUDED.flag_type,
               value_type    = EXCLUDED.value_type,
               variants_json = EXCLUDED.variants_json,
+              metadata_json = EXCLUDED.metadata_json,
               updated_at    = EXCLUDED.updated_at",
     )
     .bind(project.as_str())
@@ -398,6 +407,7 @@ where
     .bind(flag_type.trim_matches('"'))
     .bind(value_type.trim_matches('"'))
     .bind(variants_json)
+    .bind(metadata_json)
     .bind(&now)
     .bind(&now)
     .execute(executor)
@@ -510,6 +520,15 @@ fn embedded_migrator() -> Migrator {
                 MigrationType::Simple,
                 Cow::Borrowed(include_str!(
                     "../../migrations/postgres/0004_sdk_key_revocation.sql"
+                )),
+                false,
+            ),
+            Migration::new(
+                5,
+                Cow::Borrowed("add_metadata"),
+                MigrationType::Simple,
+                Cow::Borrowed(include_str!(
+                    "../../migrations/postgres/0005_add_metadata.sql"
                 )),
                 false,
             ),
@@ -668,14 +687,14 @@ impl EnvironmentRepository for PostgresStore {
 
     async fn list_environments(&self, project: &ProjectKey) -> StoreResult<Vec<Environment>> {
         let rows: Vec<EnvRow> = sqlx::query_as(
-            "SELECT key, name, external_ref, managed_by FROM environments WHERE project_key = $1",
+            "SELECT key, name, external_ref, managed_by, metadata_json FROM environments WHERE project_key = $1",
         )
         .bind(project.as_str())
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter()
-            .map(|(k, name, ext_ref, mb)| row_to_environment(k, name, ext_ref, &mb))
+            .map(|(k, name, ext_ref, mb, meta)| row_to_environment(k, name, ext_ref, &mb, meta))
             .collect()
     }
 
@@ -752,14 +771,14 @@ impl FlagRepository for PostgresStore {
     async fn list_flags(&self, project: &ProjectKey) -> StoreResult<Vec<Flag>> {
         let rows: Vec<FlagRow> =
             sqlx::query_as(
-                "SELECT key, name, description, flag_type, value_type, variants_json FROM flags WHERE project_key = $1",
+                "SELECT key, name, description, flag_type, value_type, variants_json, metadata_json FROM flags WHERE project_key = $1",
             )
             .bind(project.as_str())
             .fetch_all(&self.pool)
             .await?;
 
         rows.into_iter()
-            .map(|(k, name, desc, ft, vt, vj)| {
+            .map(|(k, name, desc, ft, vt, vj, mj)| {
                 Ok(Flag {
                     key: FlagKey::new(k).map_err(|e| domain_key_err(&e))?,
                     name,
@@ -767,6 +786,7 @@ impl FlagRepository for PostgresStore {
                     flag_type: serde_json::from_str(&format!(r#""{ft}""#))?,
                     value_type: serde_json::from_str(&format!(r#""{vt}""#))?,
                     variants: serde_json::from_value(vj)?,
+                    metadata: serde_json::from_value(mj)?,
                 })
             })
             .collect()

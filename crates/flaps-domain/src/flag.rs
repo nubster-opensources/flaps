@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     key::FlagKey,
+    metadata::Metadata,
     variant::{ValueType, Variants},
 };
 
@@ -39,6 +40,10 @@ pub struct Flag {
     pub value_type: ValueType,
     /// Global variant set; all values must match `value_type`.
     pub variants: Variants,
+    /// Arbitrary flag-level metadata, merged into the resolution metadata at
+    /// evaluation time (flag entries win over flag-set entries on collision).
+    #[serde(default, skip_serializing_if = "Metadata::is_empty")]
+    pub metadata: Metadata,
 }
 
 #[cfg(test)]
@@ -68,6 +73,7 @@ mod tests {
             flag_type: FlagType::Release,
             value_type: ValueType::Boolean,
             variants,
+            metadata: Metadata::new(),
         }
     }
 
@@ -118,7 +124,52 @@ mod tests {
             flag_type: FlagType::Ops,
             value_type: ValueType::Boolean,
             variants,
+            metadata: Metadata::new(),
         };
         assert!(flag.description.is_none());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_metadata() {
+        let mut flag = make_flag();
+        flag.metadata.insert(
+            "owner".to_owned(),
+            crate::metadata::MetadataValue::String("team-a".into()),
+        );
+        flag.metadata.insert(
+            "priority".to_owned(),
+            crate::metadata::MetadataValue::Number(3.0),
+        );
+
+        let json = serde_json::to_string(&flag).unwrap();
+        let back: Flag = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.metadata, flag.metadata);
+    }
+
+    #[test]
+    fn metadata_absent_from_json_deserializes_to_empty_map() {
+        // Proves #[serde(default)] backward compatibility: a Flag persisted
+        // before metadata existed must still deserialize successfully.
+        let json = serde_json::json!({
+            "key": "legacy-flag",
+            "name": "Legacy Flag",
+            "description": null,
+            "flag_type": "release",
+            "value_type": "boolean",
+            "variants": { "value_type": "boolean", "entries": { "on": { "bool": true } } }
+        })
+        .to_string();
+        let flag: Flag = serde_json::from_str(&json).unwrap();
+        assert!(flag.metadata.is_empty());
+    }
+
+    #[test]
+    fn empty_metadata_is_omitted_from_serialized_json() {
+        let flag = make_flag();
+        let json = serde_json::to_string(&flag).unwrap();
+        assert!(
+            !json.contains("\"metadata\""),
+            "empty metadata must not be serialized: {json}"
+        );
     }
 }

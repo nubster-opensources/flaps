@@ -265,9 +265,15 @@
           "description": { "type": ["string", "null"] },
           "flag_type": { "$ref": "#/components/schemas/FlagType" },
           "value_type": { "$ref": "#/components/schemas/ValueType" },
-          "variants": { "$ref": "#/components/schemas/Variants" }
+          "variants": { "$ref": "#/components/schemas/Variants" },
+          "metadata": { "$ref": "#/components/schemas/Metadata" }
         },
         "required": ["key", "name", "description", "flag_type", "value_type", "variants"]
+      },
+      "Metadata": {
+        "type": "object",
+        "description": "Arbitrary flag or flag-set metadata: keys map to a bare boolean, string or number. Optional; absent or omitted is equivalent to empty.",
+        "additionalProperties": { "type": ["boolean", "string", "number"] }
       },
       "WeightedVariant": {
         "type": "object",
@@ -333,7 +339,8 @@
           "key": { "type": "string" },
           "name": { "type": "string" },
           "external_ref": { "type": ["string", "null"] },
-          "managed_by": { "$ref": "#/components/schemas/ManagedBy" }
+          "managed_by": { "$ref": "#/components/schemas/ManagedBy" },
+          "metadata": { "$ref": "#/components/schemas/Metadata" }
         },
         "required": ["key", "name", "external_ref", "managed_by"]
       },
@@ -426,7 +433,11 @@
           "key": { "type": "string" },
           "value": { "description": "Omitted when the flag is disabled." },
           "reason": { "$ref": "#/components/schemas/OfrRepReason" },
-          "variant": { "type": "string", "description": "Omitted when no variant was resolved." }
+          "variant": { "type": "string", "description": "Omitted when no variant was resolved." },
+          "metadata": {
+            "allOf": [{ "$ref": "#/components/schemas/Metadata" }],
+            "description": "Flag-set metadata merged with flag metadata (flag wins on a colliding key). Omitted entirely when empty."
+          }
         },
         "required": ["key", "reason"]
       },

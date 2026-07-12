@@ -212,7 +212,23 @@ where an internal error while resolving credentials is reported as `500`
 rather than folded into `401`. This is deliberate for OFREP: a third-party
 OFREP client should never need to distinguish those cases.
 
-## 7. Versioning note
+## 7. Flag and flag-set metadata
+
+`Flag` and `Environment` both carry an optional `metadata` object: arbitrary
+keys mapping to a bare boolean, string or number (see the `Metadata` schema in
+`openapi.json`). The field is optional on every admin request and response;
+omitting it is equivalent to an empty map, and an empty map is never
+serialized back (the field is absent, not `{}`).
+
+At evaluation time, the two levels are merged into a single `metadata` object
+on the OFREP response: flag-set (environment) metadata is the base, and flag
+metadata is applied on top, so a key present at both levels resolves to the
+flag's value. This mirrors flagd's own flag-set/flag metadata model. The
+merged `metadata` field on `SingleSuccessResponse` (single and bulk
+evaluation, since `BulkFlagEntry::Success` wraps `SingleSuccessResponse`) is
+omitted entirely when the merge is empty, never emitted as `{}`.
+
+## 8. Versioning note
 
 The admin surface (`/projects/**`, `/sdk/whoami`, SDK key management) carries
 no version prefix today. `/ofrep/v1` and `/sync/v1` carry `/v1` because that is

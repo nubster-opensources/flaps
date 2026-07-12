@@ -32,4 +32,5 @@ mod targeting;
 pub use error::ParseError;
 pub use eval::{EvaluationContext, EvaluationError, Reason, Resolution};
 pub use model::{Flag, FlagSet, Metadata, MetadataValue, State, Variants};
+pub use serialize::metadata_to_json;
 pub use targeting::{Bucket, Literal, Rule, SemVerOp};
