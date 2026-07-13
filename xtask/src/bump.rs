@@ -1,13 +1,13 @@
 //! Version bump and CHANGELOG graduation.
 
 use anyhow::Context as _;
+use std::process::Command;
+use time::OffsetDateTime;
+use time::macros::format_description;
 use toml_edit::{DocumentMut, value};
 
 /// Workspace crates that carry an internal `version` in `[workspace.dependencies]`.
 /// `flapsd` is excluded: nothing depends on it, so no version to rewrite.
-// Not yet called outside tests: `run_release` wires it in during Task 6. Remove this
-// `allow` once that call site lands.
-#[allow(dead_code)]
 pub(crate) const INTERNAL_CRATES: [&str; 6] = [
     "flaps-domain",
     "flaps-eval",
@@ -19,9 +19,6 @@ pub(crate) const INTERNAL_CRATES: [&str; 6] = [
 
 /// Rewrites `[workspace.package] version` and every internal crate version in
 /// `[workspace.dependencies]` to `version`, preserving comments and formatting.
-// Not yet called outside tests: `run_release` wires it in during Task 6. Remove this
-// `allow` once that call site lands.
-#[allow(dead_code)]
 pub(crate) fn rewrite_workspace_versions(
     cargo_toml: &str,
     version: &str,
@@ -50,9 +47,6 @@ const REPO_URL: &str = "https://github.com/nubster-opensources/flaps";
 
 /// Moves the `## [Unreleased]` body under a new `## [version] - date` section,
 /// leaves `## [Unreleased]` empty, and refreshes the link references.
-// Not yet called outside tests: `run_release` wires it in during Task 6. Remove this
-// `allow` once that call site lands.
-#[allow(dead_code)]
 pub(crate) fn graduate_changelog(
     changelog: &str,
     version: &str,
@@ -121,9 +115,121 @@ pub(crate) fn extract_release_notes(changelog: &str, version: &str) -> anyhow::R
     Ok(rest[..end].trim().to_owned())
 }
 
-/// Runs the `release <version>` command. Implemented in Task 6.
-pub(crate) fn run_release(_version: &str) -> anyhow::Result<()> {
-    anyhow::bail!("release: not implemented yet")
+/// OSS commit author for release commits.
+const RELEASE_AUTHOR: &str = "Pierrick Fonquerne <pierrick.fonquerne@gmail.com>";
+
+/// Returns today's UTC date as `YYYY-MM-DD`.
+fn today() -> anyhow::Result<String> {
+    let now = OffsetDateTime::now_utc();
+    let fmt = format_description!("[year]-[month]-[day]");
+    now.format(&fmt).context("failed to format today's date")
+}
+
+/// Runs a git/gh command, returning an error with captured stderr on failure.
+fn run(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
+    let out = Command::new(cmd)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `{cmd} {}`", args.join(" ")))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`{cmd} {}` failed:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(())
+}
+
+/// Captures stdout of a command, trimmed.
+fn capture(cmd: &str, args: &[&str]) -> anyhow::Result<String> {
+    let out = Command::new(cmd)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `{cmd} {}`", args.join(" ")))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "`{cmd} {}` failed:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(String::from_utf8(out.stdout)
+        .context("command produced non-UTF-8 output")?
+        .trim()
+        .to_owned())
+}
+
+/// Bumps the workspace, graduates the CHANGELOG, and opens the release PR.
+pub(crate) fn run_release(version: &str) -> anyhow::Result<()> {
+    semver::Version::parse(version)
+        .with_context(|| format!("`{version}` is not a valid semantic version"))?;
+
+    // Guard: on `main`, clean tree, and not behind origin/main.
+    let branch = capture("git", &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    anyhow::ensure!(
+        branch == "main",
+        "release must run on `main`, not `{branch}`"
+    );
+    let dirty = capture("git", &["status", "--porcelain"])?;
+    anyhow::ensure!(
+        dirty.is_empty(),
+        "working tree must be clean before a release bump"
+    );
+    run("git", &["fetch", "origin"])?;
+    let behind = capture("git", &["rev-list", "--count", "main..origin/main"])?;
+    anyhow::ensure!(
+        behind == "0",
+        "local `main` is {behind} commit(s) behind `origin/main`; pull before releasing"
+    );
+
+    // Create the release branch BEFORE mutating any file, so a failure never
+    // leaves `main` dirty.
+    let release_branch = format!("chore/release-{version}");
+    run("git", &["switch", "-c", &release_branch])?;
+
+    // Apply the version bump and CHANGELOG graduation on the release branch.
+    let cargo_toml = std::fs::read_to_string("Cargo.toml").context("cannot read Cargo.toml")?;
+    let bumped = rewrite_workspace_versions(&cargo_toml, version)?;
+    std::fs::write("Cargo.toml", bumped).context("cannot write Cargo.toml")?;
+
+    let changelog = std::fs::read_to_string("CHANGELOG.md").context("cannot read CHANGELOG.md")?;
+    let graduated = graduate_changelog(&changelog, version, &today()?)?;
+    std::fs::write("CHANGELOG.md", graduated).context("cannot write CHANGELOG.md")?;
+
+    // Refresh Cargo.lock so the bumped versions are recorded.
+    run("cargo", &["update", "--workspace"])?;
+
+    // Commit (OSS author), push, open the PR.
+    run(
+        "git",
+        &[
+            "commit",
+            "-am",
+            &format!("chore(release): v{version}"),
+            "--author",
+            RELEASE_AUTHOR,
+        ],
+    )?;
+    run("git", &["push", "-u", "origin", &release_branch])?;
+
+    let notes = extract_release_notes(
+        &std::fs::read_to_string("CHANGELOG.md").context("cannot re-read CHANGELOG.md")?,
+        version,
+    )?;
+    run(
+        "gh",
+        &[
+            "pr",
+            "create",
+            "--title",
+            &format!("chore(release): v{version}"),
+            "--body",
+            &notes,
+            "--base",
+            "main",
+        ],
+    )?;
+    println!("Opened release PR for v{version} on branch {release_branch}");
+    Ok(())
 }
 
 /// Prints the CHANGELOG notes for `version` to stdout (used by the release workflow).
