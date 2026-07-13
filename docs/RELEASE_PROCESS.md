@@ -1,104 +1,70 @@
 # Release process
 
-Flaps uses a three-layer combo to ship new versions to crates.io. Whatever surface you choose, the underlying flow is identical: bump versions, graduate CHANGELOG, pre-flight checks, open a release prep PR, then push a tag that fires the publish workflow.
+Flaps ships to crates.io in two steps: a local version bump that opens a PR, and a tag that triggers an automated, human-gated publish. All logic lives in the `xtask` binary so it is testable and replayable off CI.
 
-> **Note:** The release tooling lands with the v0.1.0 release batch. The surfaces below describe the intended workflow once `scripts/release.sh`, `release.toml` and `.github/workflows/bump.yml` are in place.
+## 1. Bump the version (local)
 
-## Surfaces
-
-### Surface 1: Web UI (no CLI required)
-
-Use this when you want to bump from your browser, or when you do not have a local Rust toolchain handy.
-
-1. Open the `bump.yml` workflow in the repository Actions tab.
-2. Click **Run workflow**.
-3. Pick the **level** input:
-   - `patch`: `0.1.0` -> `0.1.1` (bug fixes)
-   - `minor`: `0.1.0` -> `0.2.0` (breaking changes allowed in 0.x per [SEMVER_POLICY.md](SEMVER_POLICY.md))
-   - `major`: `1.2.3` -> `2.0.0` (breaking changes in 1.x+)
-   - explicit `x.y.z`: for example `0.3.0`
-4. The workflow runs `scripts/release.sh` in CI and opens a release prep PR.
-5. Review the PR, merge it, then follow [Tagging](#tagging).
-
-### Surface 2: local script
-
-Use this when you want full control over the pre-flight (run tests against your local Docker, tweak CHANGELOG manually, etc.).
+On an up-to-date `main` with a clean working tree:
 
 ```sh
-./scripts/release.sh patch          # or minor / major / 0.3.0
+cargo xtask release 0.2.0
 ```
 
-Requirements (must be installed on your machine):
+This command:
 
-- `bash`, `git`, `python3`, `gh`
-- `cargo` and the `cargo-release` subcommand pinned to the latest version compatible with our MSRV (`cargo-release 1.1+` requires Rust 1.91+, so we stay on the 0.25 series): `cargo install --locked cargo-release@0.25.20`
+1. Refuses to run unless you are on `main` with a clean tree.
+2. Rewrites `[workspace.package] version` and every internal crate version in `[workspace.dependencies]` to the target.
+3. Graduates `CHANGELOG.md`: moves the `[Unreleased]` body under a new `[<version>] - <date>` section and refreshes the link references.
+4. Refreshes `Cargo.lock`.
+5. Creates `chore/release-<version>`, commits, pushes, and opens a PR via `gh`.
 
-The script:
+Review the PR and merge it with `--no-ff`. `main` now reflects the release.
 
-1. Refuses to run if you are not on `main` or if the working tree is dirty.
-2. Pulls `origin/main`.
-3. Computes the target version from the bump level.
-4. Creates a `release/v<TARGET>-prep` branch.
-5. Graduates `CHANGELOG.md`: moves `[Unreleased]` body under a new `[<TARGET>] - <DATE>` section, refreshes the link refs.
-6. Runs `cargo release <LEVEL> --workspace --execute --no-confirm` which bumps every `Cargo.toml` version field (path-deps included) in a single consolidated commit.
-7. Runs `cargo fmt --check`, `clippy` strict, full test suite.
-8. Pushes the branch and opens a PR via `gh`.
+## 2. Tag to publish
 
-### Surface 3: power-user, cargo-release direct
-
-For one-off bumps where you do not need the CHANGELOG graduation or the PR opening:
+After the release PR is merged:
 
 ```sh
-cargo release patch --workspace --execute --no-confirm
-```
-
-This is what `scripts/release.sh` calls under the hood. You will need to graduate the CHANGELOG manually and open the PR yourself.
-
-## Tagging
-
-After the release prep PR is merged into `main`, push the tag manually:
-
-```sh
-git checkout main
+git switch main
 git pull origin main
-git tag -a v<TARGET> -m "v<TARGET>"
-git push origin v<TARGET>
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
 ```
 
-The tag push triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml) which publishes the workspace crates to crates.io in dependency order (with 30 s sleeps between each to let the crates.io index propagate) and creates a release whose notes are extracted from the `[<TARGET>]` section of `CHANGELOG.md`.
+The tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-Tagging is deliberately a manual step so the human reviewing the PR is also the one who triggers the publish, with full awareness of what is about to leave the workshop.
+- The `verify` job builds, tests, and runs `cargo xtask publish --dry-run`.
+- The `publish` job pauses on the protected `crates-io` GitHub Environment until a maintainer approves. On approval it runs `cargo xtask publish` (idempotent) and creates the GitHub release from the `[<version>]` CHANGELOG section.
+
+Tagging and approving are deliberately manual: the human who reviewed the PR is the one who releases the crates.
 
 ## Publication order
 
-The workspace crates are published in dependency order. Crates that depend on others must wait for them to be visible on the crates.io index:
+Crates publish in dependency order, each after its internal dependencies are visible on the crates.io index:
 
-1. `flaps-domain`
-2. `flaps-eval`
-3. `flaps-compiler`
-4. `flaps-store`
-5. `flaps-client`
-6. `flaps-server`
-7. `flapsd` (binary)
+`flaps-domain -> flaps-eval -> flaps-compiler -> flaps-store -> flaps-client -> flaps-server -> flapsd`
 
-The `xtask` crate is internal to the repository and is never published.
+`xtask` is internal and never published. `cargo install flapsd` is a supported install path.
 
-## What the bump script does NOT do
+## Idempotence and recovery
 
-- It does not publish to crates.io. The tag does, via `release.yml`.
-- It does not create the release. The tag does.
-- It does not edit your `[Unreleased]` items. Whatever you wrote there is preserved verbatim under the new `[<TARGET>]` section.
-- It does not skip pre-flight checks. If `cargo fmt` or `clippy` or the test suite fails, the bump aborts.
+`cargo xtask publish` skips any crate whose exact name and version is already on crates.io. crates.io rate-limits the creation of new crate names in bursts; if publication is interrupted mid-batch, re-approve or re-run the `publish` job. It resumes at the first unpublished crate. crates.io is append-only: there is no rollback, only `cargo yank`.
+
+## Dry-run
+
+`cargo xtask publish --dry-run` validates packaging without uploading. On the very first release, no internal dependency is on crates.io yet, so downstream crates are validated with `--no-verify` (packaging only); the leaf crates (`flaps-domain`, `flaps-eval`) always get a full dry-run.
+
+## One-time ops setup
+
+Before the first real tag:
+
+- Repository secret `CARGO_REGISTRY_TOKEN`: a crates.io token scoped to publish-new and publish-update.
+- GitHub Environment `crates-io` with a required reviewer.
 
 ## Failure modes
 
-- **`error: must be on main`**: switch back to main, then retry.
-- **`error: working tree must be clean`**: commit or stash your local changes.
-- **`error: branch release/vX.Y.Z-prep already exists locally`**: a previous bump for the same version is still around. Delete it (`git branch -D release/vX.Y.Z-prep`) or pick a different target.
-- **Pre-flight failure (fmt / clippy / test)**: fix the failure on `main` first via a normal PR, then retry the bump.
-- **`gh pr create` fails**: probably an auth issue. Verify `gh auth status`. In CI the repository token is provided automatically.
-- **CHANGELOG section not found**: the Python script expects `## [Unreleased]` followed by `## [` somewhere later. If you renamed `[Unreleased]` or removed the next section, the script aborts.
-
-## Adding it to the project
-
-`release.toml` lives at the repo root and configures cargo-release. The script lives at `scripts/release.sh` and is executable. The workflow lives at `.github/workflows/bump.yml`. None of these files affect runtime crates; they are purely repository tooling.
+- `release must run on main`: switch to `main` and retry.
+- `working tree must be clean`: commit or stash local changes first.
+- `[Unreleased] is empty`: add entries under `## [Unreleased]` before bumping.
+- Publish stops on a rate limit: re-run the `publish` job; it resumes idempotently.
+- `gh` auth error: check `gh auth status`; in CI the token is provided automatically.
