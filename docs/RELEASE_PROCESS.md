@@ -33,7 +33,7 @@ git push origin v0.2.0
 
 The tag triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
-- The `verify` job builds, tests, and runs `cargo xtask publish --dry-run`.
+- The `verify` job checks the tag matches the workspace version, then builds, tests, and runs `cargo xtask publish --dry-run`.
 - The `publish` job pauses on the protected `crates-io` GitHub Environment until a maintainer approves. On approval it runs `cargo xtask publish` (idempotent) and creates the GitHub release from the `[<version>]` CHANGELOG section.
 
 Tagging and approving are deliberately manual: the human who reviewed the PR is the one who releases the crates.
