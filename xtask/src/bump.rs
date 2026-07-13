@@ -45,14 +45,93 @@ pub(crate) fn rewrite_workspace_versions(
     Ok(doc.to_string())
 }
 
+/// Repository base URL for CHANGELOG link references.
+const REPO_URL: &str = "https://github.com/nubster-opensources/flaps";
+
+/// Moves the `## [Unreleased]` body under a new `## [version] - date` section,
+/// leaves `## [Unreleased]` empty, and refreshes the link references.
+// Not yet called outside tests: `run_release` wires it in during Task 6. Remove this
+// `allow` once that call site lands.
+#[allow(dead_code)]
+pub(crate) fn graduate_changelog(
+    changelog: &str,
+    version: &str,
+    date: &str,
+) -> anyhow::Result<String> {
+    const UNRELEASED: &str = "## [Unreleased]";
+    let start = changelog
+        .find(UNRELEASED)
+        .context("CHANGELOG.md is missing the `## [Unreleased]` section")?;
+    let head = &changelog[..start];
+    let rest = &changelog[start + UNRELEASED.len()..];
+    let next = rest
+        .find("\n## ")
+        .context("CHANGELOG.md has no section after `## [Unreleased]`")?;
+    let body = rest[..next].trim();
+    anyhow::ensure!(
+        !body.is_empty(),
+        "`## [Unreleased]` is empty; nothing to graduate"
+    );
+    let tail = &rest[next + 1..];
+    let graduated = format!("{head}## [Unreleased]\n\n## [{version}] - {date}\n\n{body}\n\n{tail}");
+    update_link_refs(&graduated, version)
+}
+
+/// Rewrites the `[Unreleased]` link reference and ensures a `[version]` one exists.
+fn update_link_refs(doc: &str, version: &str) -> anyhow::Result<String> {
+    let unreleased_ref = format!("[Unreleased]: {REPO_URL}/compare/v{version}...HEAD");
+    let version_ref = format!("[{version}]: {REPO_URL}/releases/tag/v{version}");
+    let version_prefix = format!("[{version}]:");
+    let mut lines: Vec<String> = doc.lines().map(str::to_owned).collect();
+    let mut saw_version_ref = false;
+    for line in &mut lines {
+        if line.starts_with("[Unreleased]:") {
+            unreleased_ref.clone_into(line);
+        } else if line.starts_with(&version_prefix) {
+            version_ref.clone_into(line);
+            saw_version_ref = true;
+        }
+    }
+    if !saw_version_ref {
+        let pos = lines
+            .iter()
+            .position(|l| l.starts_with("[Unreleased]:"))
+            .context("CHANGELOG.md is missing the `[Unreleased]` link reference")?;
+        lines.insert(pos + 1, version_ref);
+    }
+    let mut out = lines.join("\n");
+    if doc.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Returns the body of the `## [version]` section, trimmed.
+pub(crate) fn extract_release_notes(changelog: &str, version: &str) -> anyhow::Result<String> {
+    let heading = format!("## [{version}]");
+    let start = changelog
+        .find(&heading)
+        .with_context(|| format!("CHANGELOG.md has no `{heading}` section"))?;
+    // Skip to end of the heading line.
+    let after_heading = changelog[start..]
+        .find('\n')
+        .map_or(changelog.len(), |i| start + i + 1);
+    let rest = &changelog[after_heading..];
+    let end = rest.find("\n## ").map_or(rest.len(), |i| i);
+    Ok(rest[..end].trim().to_owned())
+}
+
 /// Runs the `release <version>` command. Implemented in Task 6.
 pub(crate) fn run_release(_version: &str) -> anyhow::Result<()> {
     anyhow::bail!("release: not implemented yet")
 }
 
-/// Prints the CHANGELOG notes for `version`. Implemented in Task 3.
-pub(crate) fn print_changelog_notes(_version: &str) -> anyhow::Result<()> {
-    anyhow::bail!("changelog-notes: not implemented yet")
+/// Prints the CHANGELOG notes for `version` to stdout (used by the release workflow).
+pub(crate) fn print_changelog_notes(version: &str) -> anyhow::Result<()> {
+    let changelog = std::fs::read_to_string("CHANGELOG.md").context("cannot read CHANGELOG.md")?;
+    let notes = extract_release_notes(&changelog, version)?;
+    println!("{notes}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -97,5 +176,65 @@ serde = { version = "1", features = ["derive"] }
             "[workspace.package]\nversion = \"0.1.0\"\n\n[workspace.dependencies]\nserde = \"1\"\n";
         let err = rewrite_workspace_versions(broken, "0.2.0").unwrap_err();
         assert!(err.to_string().contains("flaps-domain"));
+    }
+
+    const CHANGELOG: &str = "\
+# Changelog
+
+The format follows Keep a Changelog.
+
+## [Unreleased]
+
+### Added
+
+- Feature one.
+- Feature two.
+
+## M0: Foundations
+
+### Added
+
+- Bootstrap.
+
+[Unreleased]: https://github.com/nubster-opensources/flaps/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nubster-opensources/flaps/releases/tag/v0.1.0
+";
+
+    #[test]
+    fn graduates_unreleased_under_new_version() {
+        let out = graduate_changelog(CHANGELOG, "0.2.0", "2026-07-13").unwrap();
+        assert!(
+            out.contains(
+                "## [Unreleased]\n\n## [0.2.0] - 2026-07-13\n\n### Added\n\n- Feature one."
+            )
+        );
+        // Unreleased is now empty (heading immediately followed by the new version heading).
+        // M0 section survives untouched.
+        assert!(out.contains("## M0: Foundations"));
+        // Link references updated.
+        assert!(out.contains(
+            "[Unreleased]: https://github.com/nubster-opensources/flaps/compare/v0.2.0...HEAD"
+        ));
+        assert!(
+            out.contains(
+                "[0.2.0]: https://github.com/nubster-opensources/flaps/releases/tag/v0.2.0"
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_to_graduate_empty_unreleased() {
+        let empty = "# Changelog\n\n## [Unreleased]\n\n## M0: Foundations\n\n- x.\n";
+        let err = graduate_changelog(empty, "0.2.0", "2026-07-13").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn extracts_notes_for_version() {
+        let graduated = graduate_changelog(CHANGELOG, "0.2.0", "2026-07-13").unwrap();
+        let notes = extract_release_notes(&graduated, "0.2.0").unwrap();
+        assert!(notes.contains("- Feature one."));
+        assert!(notes.contains("- Feature two."));
+        assert!(!notes.contains("Foundations"));
     }
 }
