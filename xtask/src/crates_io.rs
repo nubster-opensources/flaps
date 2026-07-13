@@ -37,14 +37,12 @@ pub(crate) fn index_has_version(index_body: &str, version: &str) -> bool {
 }
 
 /// Returns true if publish output indicates a crates.io rate limit.
-#[allow(dead_code)] // Removal trigger: Task 5 (publish.rs::run_publish) calls this.
 pub(crate) fn is_rate_limit_error(output: &str) -> bool {
     let lower = output.to_lowercase();
     lower.contains("429") || lower.contains("too many")
 }
 
 /// Delay before the next publish attempt: honour `retry_after`, else exponential (cap 300s).
-#[allow(dead_code)] // Removal trigger: Task 5 (publish.rs::run_publish) calls this.
 pub(crate) fn backoff_delay(attempt: u32, retry_after: Option<u64>) -> Duration {
     match retry_after {
         Some(secs) => Duration::from_secs(secs),
@@ -53,7 +51,6 @@ pub(crate) fn backoff_delay(attempt: u32, retry_after: Option<u64>) -> Duration 
 }
 
 /// Builds a blocking HTTP client with the required User-Agent.
-#[allow(dead_code)] // Removal trigger: Task 5 (publish.rs::run_publish) calls this.
 pub(crate) fn client() -> anyhow::Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
@@ -63,7 +60,6 @@ pub(crate) fn client() -> anyhow::Result<reqwest::blocking::Client> {
 }
 
 /// Returns true if `name` `version` is already on crates.io.
-#[allow(dead_code)] // Removal trigger: Task 5 (publish.rs::run_publish) calls this.
 pub(crate) fn is_published(
     client: &reqwest::blocking::Client,
     name: &str,
@@ -83,7 +79,6 @@ pub(crate) fn is_published(
 }
 
 /// Polls the sparse index until `version` of `name` is visible or `timeout` elapses.
-#[allow(dead_code)] // Removal trigger: Task 5 (publish.rs::run_publish) calls this.
 pub(crate) fn wait_for_index(
     client: &reqwest::blocking::Client,
     name: &str,
