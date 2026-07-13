@@ -30,7 +30,7 @@ Remote and local evaluation use the same artifact and the same engine (`flaps-ev
 1. A mutation goes through the admin API inside a database transaction: entity write plus audit entry. The commit is the source of truth.
 2. Compilation runs synchronously after the commit, outside the transaction. Each affected environment gets a new ruleset with a monotonic version and a content hash (ETag). A crash between commit and compilation is harmless: compilation is idempotent and re-runs at boot.
 3. The server stores the ruleset and swaps it atomically in memory. An invalid artifact is never swapped in.
-4. A `ruleset.changed { env, version }` event is published over SSE. Changing a segment recompiles every affected environment but emits one event per environment.
+4. An anonymous SSE event with payload `{ "environment": ..., "version": ... }` is published (no named `event` field). Changing a segment recompiles every affected environment but emits one event per environment.
 
 ## Evaluation paths
 

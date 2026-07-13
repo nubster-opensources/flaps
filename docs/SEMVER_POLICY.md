@@ -25,9 +25,9 @@ The headline published crates are `flaps-eval` and `flaps-client`. The public AP
 
 - Public types, traits, functions, constants and modules.
 - Trait method signatures and associated types.
-- Public re-exports from sibling crates (the facade crate `flaps` re-exports curated items).
+- Public re-exports from sibling crates.
 - The on-disk schema produced by store migrations. Schema changes that require migration are treated as breaking changes.
-- The OFREP-compatible REST API surface under `/v1/`.
+- The OFREP-compatible REST API surface under `/ofrep/v1/`.
 - The compiled ruleset format produced by the compiler pipeline.
 - The admin REST API surface once it is published.
 
@@ -36,7 +36,7 @@ Items that are explicitly NOT part of the public API:
 - Anything under a module annotated `#[doc(hidden)]`.
 - Test-only helpers under `#[cfg(test)]`.
 - Behaviour of internal SQL statements (the `WHERE` clauses, the `LIMIT`, the index usage) provided that observable semantics (tenant isolation, at-least-once delivery) are preserved.
-- The internal layout of the store on disk or in object storage. Operators must use the public CLI and API to interact with stored data.
+- The internal layout of the store on disk or in object storage. Operators must use the public API to interact with stored data.
 
 ## Deprecation cycle
 

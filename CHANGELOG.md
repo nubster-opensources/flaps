@@ -7,8 +7,6 @@ This project adheres to [Semantic Versioning](docs/SEMVER_POLICY.md).
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
-
 ### Added
 
 - `flaps-domain`: rich flag model covering projects, environments, flags, variants, segments,
@@ -24,7 +22,10 @@ This project adheres to [Semantic Versioning](docs/SEMVER_POLICY.md).
 - `flapsd`: server daemon with TOML configuration, first-admin bootstrap, and structured logging.
 - `flaps-client`: OpenFeature in-process provider for Rust with HTTP sync, SSE notifications,
   local evaluation, disk snapshot fallback, and staleness metrics.
-- `xtask`: workspace task runner (coverage, lints).
+- `xtask`: release pre-flight checks.
+- Flag and flag-set metadata carried end to end through to OFREP evaluation responses.
+- Admin read endpoints now require an authenticated admin session.
+- HTTP API reference (OpenAPI plus guide) with a CI coverage guard.
 - CI: fmt, clippy, tests (Ubuntu, macOS, Windows), PostgreSQL integration, MSRV check,
   supply-chain audit.
 - Dual MIT OR Apache-2.0 licensing, `deny.toml` supply-chain policy.

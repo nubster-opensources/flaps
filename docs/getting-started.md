@@ -1,23 +1,50 @@
 # Getting started
 
-> Pre-alpha. Nothing below works end to end yet. This page illustrates the experience targeted by v0.1.0, which is headless: flags are managed through the admin REST API. The admin UI ships in v0.2.
+> Pre-alpha: not released yet, build `flapsd` from source (see the root README Quick start). Flags are managed entirely through the admin REST API in v0.1.0; the admin UI ships in v0.2.
 
 ## Run the server
 
 ```bash
+export FLAPS_HMAC_PEPPER=<long-random-secret>
+```
+
+```toml
+# flapsd.toml
+database_url = "sqlite://flaps.db"
+bind_addr    = "127.0.0.1:8080"
+```
+
+```bash
 # SQLite needs no external service; PostgreSQL is supported for production
-flapsd --config flaps.toml
+flapsd --config flapsd.toml
 ```
 
 On first start `flapsd` bootstraps an admin account and prints its credentials once.
 
 ## Create a flag through the admin API
 
+Log in with the printed credentials to get a session token, create the project the flag lives in, then create the flag itself.
+
 ```bash
-curl -X POST http://localhost:8080/api/admin/v1/projects/my-app/flags \
+curl -s -X POST http://localhost:8080/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "<printed-password>"}'
+# -> {"token": "...", "expires_at": "..."}; export it below.
+
+export ADMIN_TOKEN=<token from the response above>
+
+curl -X PUT http://localhost:8080/projects/my-app \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"key": "new-dashboard", "flag_type": "release", "value_type": "boolean", "variants": {"on": true, "off": false}}'
+  -H "Content-Type: application/json" \
+  -d '{"key": "my-app", "name": "My App", "managed_by": "local"}'
+
+curl -X PUT http://localhost:8080/projects/my-app/flags/new-dashboard \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "new-dashboard", "name": "New dashboard", "flag_type": "release", "value_type": "boolean", "variants": {"value_type": "boolean", "entries": {"on": {"bool": true}, "off": {"bool": false}}}}'
 ```
+
+See [the HTTP API reference](spec/api-v1.md) for the full authentication model, ETag semantics and error format.
 
 ## Evaluate from any OpenFeature SDK (remote, OFREP)
 

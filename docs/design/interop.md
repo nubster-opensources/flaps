@@ -25,7 +25,7 @@ Human authentication starts with local accounts. Generic OIDC discovery lands in
 - `external_ref`: an opaque, indexed, unique URI set by an external system. Flaps never interprets it.
 - `managed_by`: a display hint that warns before manual edits of externally managed resources.
 
-The admin API supports idempotent upsert by `external_ref`, so an external control plane can reconcile desired state instead of scripting imperative calls. Identifiers cross the boundary; structures never do.
+The admin API upserts `Project` and `Environment` by their path key (`PUT /projects/{project}`, `PUT /projects/{project}/environments/{env}`), so an external control plane can reconcile desired state instead of scripting imperative calls. `external_ref` is a separate unique attribute on the same resource: reusing it on a different key returns 409. Identifiers cross the boundary; structures never do.
 
 ## No lock-in test
 
@@ -34,4 +34,4 @@ The admin API supports idempotent upsert by `external_ref`, so an external contr
 | Flag consumption | OpenFeature / OFREP | any OpenFeature SDK |
 | In-process evaluation | flagd format | any flagd compatible provider |
 | Human SSO (v0.2) | OIDC discovery | any compliant IdP |
-| Platform embedding | opaque external_ref upsert | any control plane |
+| Platform embedding | upsert by key, opaque external_ref | any control plane |

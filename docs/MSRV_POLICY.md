@@ -12,7 +12,7 @@ The MSRV is pinned in `rust-toolchain.toml` at the repository root and declared 
 
 ## Why we pick the floor we pick
 
-- **1.88** is required because Flaps uses Rust edition 2024 features and stabilised async fn in traits.
+- **1.88** was the current stable release when the repository was bootstrapped, chosen as the floor rather than tracking a specific language feature. The workspace uses edition 2024, which itself only requires Rust 1.85.
 - Future bumps will be driven by concrete features the project needs (for example an upcoming GAT stabilisation, an `async closure` improvement, a `rustls` API requiring a newer compiler), not by chasing the latest stable.
 
 ## How we verify the MSRV in CI
