@@ -22,7 +22,7 @@ This project adheres to [Semantic Versioning](docs/SEMVER_POLICY.md).
 - `flapsd`: server daemon with TOML configuration, first-admin bootstrap, and structured logging.
 - `flaps-client`: OpenFeature in-process provider for Rust with HTTP sync, SSE notifications,
   local evaluation, disk snapshot fallback, and staleness metrics.
-- `xtask`: release pre-flight checks.
+- `xtask`: release automation (version bump and idempotent crates.io publish).
 - Flag and flag-set metadata carried end to end through to OFREP evaluation responses.
 - Admin read endpoints now require an authenticated admin session.
 - HTTP API reference (OpenAPI plus guide) with a CI coverage guard.

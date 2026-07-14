@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Flaps repository tooling: release pre-flight checks"
+description = "Flaps repository tooling: release automation (version bump and crates.io publish)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+semver = { workspace = true }
+serde_json = { workspace = true }
+toml_edit = "0.22"
+time = { version = "0.3", features = ["formatting", "macros"] }
+reqwest = { workspace = true, features = ["blocking"] }
 
 [lints]
 workspace = true
