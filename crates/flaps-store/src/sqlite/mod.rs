@@ -1,5 +1,6 @@
 //! SQLite backend: pool construction, migrations and repository implementations.
 
+use std::str::FromStr;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -560,6 +561,7 @@ impl SqliteStore {
     /// # Errors
     /// Returns [`StoreError`] if the connection or migrations fail.
     pub async fn connect(url: &str, hasher: KeyHasher) -> StoreResult<Self> {
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(url)?.create_if_missing(true);
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .after_connect(|conn, _| {
                 Box::pin(async move {
@@ -569,7 +571,7 @@ impl SqliteStore {
                     Ok(())
                 })
             })
-            .connect(url)
+            .connect_with(options)
             .await?;
         embedded_migrator().run(&pool).await?;
         Ok(Self { pool, hasher })
@@ -1636,5 +1638,51 @@ impl WriteSession for SqliteWriteSession<'_> {
     async fn commit(self) -> StoreResult<()> {
         self.tx.commit().await?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::SqliteStore;
+    use crate::hash::KeyHasher;
+
+    /// Issue #98 regression: `SqliteStore::connect` must create the database
+    /// file when it does not exist yet, matching a fresh Docker volume or a
+    /// first run of the daemon. Before the fix, the pool opens the URL with
+    /// the default `create_if_missing = false`, so connecting to a file that
+    /// has never been created fails with SQLite error 14 (unable to open
+    /// database file) and the daemon never boots.
+    #[tokio::test]
+    async fn connect_creates_missing_database_file() {
+        let dir = std::env::temp_dir().join(format!("flaps-store-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("failed to create the temp test directory");
+        let db_path = dir.join("flaps.db");
+        assert!(
+            !db_path.exists(),
+            "test setup invariant: the database file must not exist yet"
+        );
+
+        let url = format!(
+            "sqlite:{}",
+            db_path.display().to_string().replace('\\', "/")
+        );
+
+        let result = SqliteStore::connect(&url, KeyHasher::new(b"test-pepper".to_vec())).await;
+
+        assert!(
+            result.is_ok(),
+            "connect must succeed and create the database file on a fresh path: {:?}",
+            result.err()
+        );
+        assert!(
+            db_path.exists(),
+            "the database file must exist on disk after connect"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
