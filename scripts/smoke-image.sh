@@ -54,7 +54,7 @@ docker run -d --name "$CONTAINER" \
 # server booted and is serving on the SQLite-backed store.
 CODE="000"
 for _ in $(seq 1 30); do
-  CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:18080/login || echo 000)"
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:18080/login)" || CODE="000"
   if [ "$CODE" != "000" ]; then
     break
   fi
