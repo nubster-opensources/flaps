@@ -60,3 +60,32 @@ Point the generic OFREP provider of your OpenFeature SDK at the Flaps server wit
 ## Kill switch
 
 Disabling a flag in the admin API propagates to connected in-process clients in under two seconds. Clients that miss the notification converge through their backup polling interval.
+
+## Run with Docker
+
+`flapsd` ships as a container image on Docker Hub (`nubster/flaps`). The image
+runs as a non-root user and reads its configuration from a mounted TOML file.
+
+Create a `flapsd.toml` that binds to all interfaces and stores its SQLite
+database under the data volume:
+
+```toml
+database_url = "sqlite:///var/lib/flaps/flaps.db"
+bind_addr    = "0.0.0.0:8080"
+```
+
+Then start the container, passing the HMAC pepper as an environment variable and
+mounting the configuration read-only:
+
+```bash
+docker run --rm \
+  -e FLAPS_HMAC_PEPPER=change-me-to-a-long-random-secret \
+  -v "$PWD/flapsd.toml:/etc/flaps/flapsd.toml:ro" \
+  -v flaps-data:/var/lib/flaps \
+  -p 8080:8080 \
+  nubster/flaps:latest
+```
+
+The daemon listens on port 8080. The `flaps-data` volume persists the SQLite
+database across restarts. `FLAPS_HMAC_PEPPER` is required: the daemon refuses to
+start without it.
