@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nubster-opensources/lightshuttle/main/docs/spec/manifest-v0.schema.json
+project:
+  name: flaps
+
+resources:
+  db:
+    postgres:
+      version: "16"
+      database: flaps
+
+  flapsd:
+    dockerfile:
+      context: .
+      command:
+        - sh
+        - -c
+        - >
+          printf 'database_url = "%s"\nbind_addr = "0.0.0.0:8080"\n' "$DATABASE_URL"
+          > /etc/flaps/flapsd.toml
+          && exec /usr/local/bin/flapsd --config /etc/flaps/flapsd.toml
+      env:
+        DATABASE_URL: ${resources.db.url}
+        FLAPS_HMAC_PEPPER: dev-insecure-pepper-change-me
+      ports:
+        - 8080
