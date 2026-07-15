@@ -89,3 +89,40 @@ docker run --rm \
 The daemon listens on port 8080. The `flaps-data` volume persists the SQLite
 database across restarts. `FLAPS_HMAC_PEPPER` is required: the daemon refuses to
 start without it.
+
+## Local dev loop (Postgres)
+
+SQLite stays the default and needs no external service: the SQLite setup shown
+under "Run the server" above is still the shortest path, and nothing on this page
+is required to build or test flaps. The two options below are optional
+conveniences for contributors who want to run against PostgreSQL, the way CI
+does.
+
+Both start the same stack: PostgreSQL 16 and `flapsd` built from the local
+Dockerfile, with the daemon reachable on `http://localhost:8080`.
+
+### With Docker Compose
+
+```bash
+docker compose up --build
+```
+
+The first build compiles a release binary and takes a few minutes. Later runs
+reuse the cache.
+
+### With LightShuttle
+
+If you have [LightShuttle](https://github.com/nubster-opensources/lightshuttle)
+installed, `lightshuttle.yml` starts the same stack in one command and adds its
+dashboard:
+
+```bash
+lightshuttle up
+```
+
+Both files pass `FLAPS_HMAC_PEPPER=dev-insecure-pepper-change-me`. This is a
+placeholder for local development only. Never reuse it outside your machine:
+production deployments must supply a long random secret of their own.
+
+On first start `flapsd` prints the generated admin credentials once. Use them
+with the admin API as shown above.
