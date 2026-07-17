@@ -11,9 +11,10 @@ resources:
   flapsd:
     dockerfile:
       context: .
-      command:
+      entrypoint:
         - sh
         - -c
+      command:
         - >
           printf 'database_url = "%s"\nbind_addr = "0.0.0.0:8080"\n' "$DATABASE_URL"
           > /etc/flaps/flapsd.toml
