@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/nubster-opensources/lightshuttle/main/docs/spec/manifest-v0.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nubster-opensources/lightshuttle/v0.5.0/docs/spec/manifest-v0.schema.json
 project:
   name: flaps
 

@@ -112,9 +112,9 @@ reuse the cache.
 
 ### With LightShuttle
 
-If you have [LightShuttle](https://github.com/nubster-opensources/lightshuttle)
-installed, `lightshuttle.yml` starts the same stack in one command and adds its
-dashboard:
+[LightShuttle](https://github.com/nubster-opensources/lightshuttle) is an
+optional dev orchestrator. Install it with `cargo install lightshuttle`, then
+`lightshuttle.yml` starts the same stack in one command and adds its dashboard:
 
 ```bash
 lightshuttle up
