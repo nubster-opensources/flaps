@@ -28,3 +28,6 @@ Thumbs.db
 /data/
 *.db
 *.sqlite
+
+# Local dev orchestrator runtime (LightShuttle control plane discovery)
+/.lightshuttle/
