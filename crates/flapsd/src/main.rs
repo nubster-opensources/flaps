@@ -350,7 +350,7 @@ mod tests {
             .await
             .expect("bootstrap admin");
 
-        let config = base_config(None, Some(1));
+        let config = base_config(None, Some(2));
         let state = build_app_state(store, &config);
         let app = build_router(state);
 
@@ -381,8 +381,10 @@ mod tests {
             "session must be valid immediately after login"
         );
 
-        // Wait past the configured 1-second TTL.
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        // Wait past the configured 2-second TTL. The store truncates session
+        // timestamps to whole seconds, so the margin must clear a full extra
+        // second to stay deterministic under loaded CI.
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
 
         let list_req = Request::builder()
             .method("GET")
@@ -394,7 +396,7 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
-            "session minted with a 1-second TTL must be expired after 1.2 seconds"
+            "session minted with a 2-second TTL must be expired after 2.2 seconds"
         );
     }
 
