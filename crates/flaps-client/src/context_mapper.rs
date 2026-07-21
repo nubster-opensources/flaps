@@ -8,6 +8,7 @@ use open_feature::{
     EvaluationContext, EvaluationContextFieldValue, EvaluationError, EvaluationErrorCode,
     EvaluationResult, StructValue, Value as OpenFeatureValue,
 };
+use time::OffsetDateTime;
 
 /// Converts an OpenFeature evaluation context to a flaps-eval evaluation context.
 ///
@@ -16,9 +17,10 @@ use open_feature::{
 /// exactly what the OFREP HTTP endpoint would receive for the same logical
 /// context: primitives convert to their JSON counterpart, and
 /// [`EvaluationContextFieldValue::Struct`] payloads that wrap a supported
-/// structured type ([`StructValue`] or [`OpenFeatureValue`]) convert to a
-/// nested JSON object or array. This preserves the remote/local parity
-/// guarantee for rules that target nested fields (e.g. `user.plan`).
+/// structured type ([`StructValue`], [`OpenFeatureValue`], or a raw
+/// [`serde_json::Value`]) convert to a nested JSON object or array. This
+/// preserves the remote/local parity guarantee for rules that target nested
+/// fields (e.g. `user.plan`).
 ///
 /// The `timestamp` is set to the current UNIX second so evaluation rules that
 /// depend on time see a consistent value within a single evaluation call.
@@ -27,10 +29,10 @@ use open_feature::{
 ///
 /// Returns [`EvaluationErrorCode::InvalidContext`] when a custom field is a
 /// [`EvaluationContextFieldValue::Struct`] wrapping a type other than
-/// [`StructValue`] or [`OpenFeatureValue`]. Such a payload is opaque
-/// (type-erased behind `Arc<dyn Any>`) and cannot be introspected into JSON;
-/// the error is surfaced to the caller instead of silently dropping the
-/// field.
+/// [`StructValue`], [`OpenFeatureValue`], or [`serde_json::Value`]. Such a
+/// payload is opaque (type-erased behind `Arc<dyn Any>`) and cannot be
+/// introspected into JSON; the error is surfaced to the caller instead of
+/// silently dropping the field.
 pub(crate) fn map_context(
     of_ctx: &EvaluationContext,
 ) -> EvaluationResult<flaps_eval::EvaluationContext> {
@@ -73,20 +75,34 @@ fn field_to_json(
             serde_json::Number::from_f64(*f).map(serde_json::Value::Number)
         }
         EvaluationContextFieldValue::String(s) => Some(serde_json::Value::String(s.clone())),
-        EvaluationContextFieldValue::DateTime(dt) => {
-            Some(serde_json::Value::Number(dt.unix_timestamp().into()))
-        }
+        EvaluationContextFieldValue::DateTime(dt) => Some(datetime_field_to_json(dt)),
         EvaluationContextFieldValue::Struct(opaque) => Some(struct_field_to_json(key, opaque)?),
     };
     Ok(json)
 }
 
+/// Converts a context `DateTime` field to its wire representation.
+///
+/// The wire representation is the integer Unix timestamp in seconds, i.e.
+/// [`OffsetDateTime::unix_timestamp`]. Integer Unix seconds is the CANONICAL
+/// wire representation for `DateTime` context fields: any future OFREP
+/// client-side serializer MUST encode `DateTime` fields the same way for
+/// remote/local evaluation results to stay in parity with the value produced
+/// here.
+fn datetime_field_to_json(dt: &OffsetDateTime) -> serde_json::Value {
+    serde_json::Value::Number(dt.unix_timestamp().into())
+}
+
 /// Converts an opaque `Struct` payload to JSON.
 ///
-/// Recognises the two structured value types the `open_feature` crate ships:
-/// [`StructValue`] (a JSON object) and [`OpenFeatureValue`] (which may itself
-/// be an array, a nested struct, or a primitive). Any other type cannot be
-/// inspected through `Any` and is reported as
+/// Recognises the three structured value types this module supports:
+/// [`StructValue`] (a JSON object), [`OpenFeatureValue`] (which may itself be
+/// an array, a nested struct, or a primitive), and a raw [`serde_json::Value`]
+/// (already JSON, so it is cloned through unchanged). The last one covers the
+/// most common way a Rust caller supplies structured context data directly,
+/// and is exactly what the OFREP HTTP path carries for the same logical
+/// payload, so recognising it here closes a remote/local parity gap. Any
+/// other type cannot be inspected through `Any` and is reported as
 /// [`EvaluationErrorCode::InvalidContext`] rather than silently dropped.
 fn struct_field_to_json(
     key: &str,
@@ -98,12 +114,16 @@ fn struct_field_to_json(
     if let Some(value) = opaque.downcast_ref::<OpenFeatureValue>() {
         return Ok(open_feature_value_to_json(value));
     }
+    if let Some(json_value) = opaque.downcast_ref::<serde_json::Value>() {
+        return Ok(json_value.clone());
+    }
     Err(EvaluationError {
         code: EvaluationErrorCode::InvalidContext,
         message: Some(format!(
             "custom field `{key}` holds an opaque struct value that is neither \
-             `open_feature::StructValue` nor `open_feature::Value`; wrap structured \
-             data in one of those types so it can be converted to JSON"
+             `open_feature::StructValue`, `open_feature::Value`, nor \
+             `serde_json::Value`; wrap structured data in one of those types so \
+             it can be converted to JSON"
         )),
     })
 }
@@ -259,6 +279,20 @@ mod tests {
     }
 
     #[test]
+    fn maps_raw_serde_json_value_struct_field_to_nested_json_object() {
+        let of_ctx = EvaluationContext::default().with_custom_field(
+            "user",
+            EvaluationContextFieldValue::new_struct(serde_json::json!({ "plan": "pro" })),
+        );
+        let eval_ctx =
+            map_context(&of_ctx).expect("a raw serde_json::Value struct field is supported");
+        assert_eq!(
+            eval_ctx.attributes.get("user"),
+            Some(&serde_json::json!({ "plan": "pro" }))
+        );
+    }
+
+    #[test]
     fn opaque_struct_type_is_reported_as_invalid_context_not_dropped() {
         let of_ctx = EvaluationContext::default()
             .with_custom_field("opaque", EvaluationContextFieldValue::new_struct(42_u32));
@@ -337,6 +371,34 @@ mod tests {
             ),
         );
         let local_ctx = map_context(&of_ctx).expect("StructValue maps to json");
+        let flag_set = flaps_eval::FlagSet::from_json(NESTED_OBJECT_DOCUMENT)
+            .expect("valid flag set document");
+        let local_resolution = flag_set
+            .evaluate("pro-only", &local_ctx)
+            .expect("evaluation succeeds");
+
+        let mut oracle_attributes = BTreeMap::new();
+        oracle_attributes.insert("user".to_owned(), serde_json::json!({ "plan": "pro" }));
+        let oracle_ctx = flaps_eval::EvaluationContext {
+            targeting_key: None,
+            attributes: oracle_attributes,
+            timestamp: local_ctx.timestamp,
+        };
+        let oracle_resolution = flag_set
+            .evaluate("pro-only", &oracle_ctx)
+            .expect("evaluation succeeds");
+
+        assert_eq!(local_resolution, oracle_resolution);
+        assert_eq!(local_resolution.value, Some(serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn raw_serde_json_value_struct_field_evaluates_identically_to_the_ofrep_json_shape() {
+        let of_ctx = EvaluationContext::default().with_custom_field(
+            "user",
+            EvaluationContextFieldValue::new_struct(serde_json::json!({ "plan": "pro" })),
+        );
+        let local_ctx = map_context(&of_ctx).expect("serde_json::Value maps to json");
         let flag_set = flaps_eval::FlagSet::from_json(NESTED_OBJECT_DOCUMENT)
             .expect("valid flag set document");
         let local_resolution = flag_set

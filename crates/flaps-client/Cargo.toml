@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 futures-util = { workspace = true }
 bytes = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
@@ -31,7 +32,6 @@ serde_json = { workspace = true }
 flaps-server = { workspace = true }
 flaps-store = { workspace = true }
 flaps-domain = { workspace = true }
-time = { workspace = true }
 
 [lints]
 workspace = true
