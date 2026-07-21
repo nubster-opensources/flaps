@@ -37,7 +37,13 @@ const FLAGD_DOCUMENT: &str = r#"
     "bool-flag": {
       "state": "ENABLED",
       "variants": { "on": true, "off": false },
-      "defaultVariant": "on"
+      "defaultVariant": "on",
+      "metadata": {
+        "owner": "team-flags",
+        "priority": 2,
+        "rollout": 0.5,
+        "enabled": true
+      }
     },
     "string-flag": {
       "state": "ENABLED",
@@ -64,6 +70,10 @@ const FLAGD_DOCUMENT: &str = r#"
       "variants": { "on": true, "off": false },
       "defaultVariant": "on"
     }
+  },
+  "metadata": {
+    "environment": "test",
+    "priority": 1
   }
 }
 "#;
