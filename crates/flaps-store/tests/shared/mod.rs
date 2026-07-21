@@ -1647,6 +1647,27 @@ async fn test_foreign_key_violation_on_missing_parent<
         "upsert_segment under a missing project must return ForeignKeyViolation, got: {segment_result:?}"
     );
 
+    let sdk_key_missing_project_result = store
+        .create_sdk_key(
+            "tester",
+            "fk-missing-project-raw-key-12345",
+            &NewSdkKey {
+                kind: SdkKeyKind::Server,
+                scope: SdkKeyScope {
+                    project_key: missing_project.clone(),
+                    environment_key: EnvironmentKey::new("fk-env").unwrap(),
+                },
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            sdk_key_missing_project_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "create_sdk_key under a missing project must return ForeignKeyViolation, got: {sdk_key_missing_project_result:?}"
+    );
+
     // A real project, but with a flag/environment pair that does not exist under it.
     let proj = make_project("fk-parent-proj");
     store.upsert_project("tester", &proj).await.unwrap();
