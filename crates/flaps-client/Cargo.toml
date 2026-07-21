@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 flaps-server = { workspace = true }
 flaps-store = { workspace = true }
 flaps-domain = { workspace = true }
+time = { workspace = true }
 
 [lints]
 workspace = true

@@ -149,7 +149,7 @@ impl FlapsProvider {
             message: Some("No ruleset loaded; sync may have failed during initialize".to_owned()),
         })?;
 
-        let eval_ctx = context_mapper::map_context(evaluation_context);
+        let eval_ctx = context_mapper::map_context(evaluation_context)?;
 
         let resolution = flag_set.evaluate(flag_key, &eval_ctx).map_err(|e| {
             use flaps_eval::EvaluationError as EvalErr;
