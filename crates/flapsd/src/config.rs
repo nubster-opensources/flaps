@@ -5,6 +5,7 @@
 //! environment variable `FLAPS_HMAC_PEPPER` (fail-closed if absent or empty).
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -31,10 +32,27 @@ pub struct Config {
     #[serde(default = "default_admin_username")]
     pub admin_username: String,
 
-    /// Optional per-minute rate limit for SDK endpoints.
+    /// Per-minute SDK rate limit, applied to both the SQLite and PostgreSQL
+    /// storage backends (default:
+    /// [`DEFAULT_RATE_LIMIT_PER_MINUTE`](flaps_server::state::DEFAULT_RATE_LIMIT_PER_MINUTE)
+    /// requests/minute when omitted).
+    ///
+    /// Must be greater than zero: use [`Config::effective_rate_limit_per_minute`]
+    /// to read the value with the default applied. A zero value is rejected by
+    /// [`Config::load`] as [`ConfigError::InvalidRateLimit`]; it has no
+    /// "disable rate limiting" meaning, since a limiter that never lets a
+    /// request through would be indistinguishable from a misconfiguration.
     pub rate_limit_per_minute: Option<u32>,
 
-    /// Optional session TTL in seconds.
+    /// Admin session TTL, in seconds (default:
+    /// [`DEFAULT_SESSION_TTL_SECS`](flaps_server::state::DEFAULT_SESSION_TTL_SECS)
+    /// seconds, i.e. 24 hours, when omitted).
+    ///
+    /// Controls how long a session minted by `POST /login` stays valid. Use
+    /// [`Config::effective_session_ttl`] to read the value with the default
+    /// applied. A zero value is rejected by [`Config::load`] as
+    /// [`ConfigError::InvalidSessionTtl`]: a session that expires immediately
+    /// is never useful.
     pub session_ttl_secs: Option<u64>,
 }
 
@@ -65,6 +83,22 @@ pub enum ConfigError {
     /// The `FLAPS_HMAC_PEPPER` environment variable is absent or empty.
     #[error("FLAPS_HMAC_PEPPER is not set or is empty (fail-closed)")]
     PepperMissing,
+
+    /// `rate_limit_per_minute` is set to zero.
+    #[error(
+        "invalid rate_limit_per_minute: must be greater than zero (omit the field to use the \
+         default of {} requests/minute)",
+        flaps_server::state::DEFAULT_RATE_LIMIT_PER_MINUTE
+    )]
+    InvalidRateLimit,
+
+    /// `session_ttl_secs` is set to zero.
+    #[error(
+        "invalid session_ttl_secs: must be greater than zero (omit the field to use the \
+         default of {} seconds)",
+        flaps_server::state::DEFAULT_SESSION_TTL_SECS
+    )]
+    InvalidSessionTtl,
 }
 
 impl Config {
@@ -108,7 +142,43 @@ impl Config {
             )));
         }
 
+        // Validate rate_limit_per_minute: zero has no documented meaning, so it
+        // is rejected rather than silently accepted as "no traffic allowed".
+        if self.rate_limit_per_minute == Some(0) {
+            return Err(ConfigError::InvalidRateLimit);
+        }
+
+        // Validate session_ttl_secs: a session that expires the instant it is
+        // minted is never useful, so zero is rejected outright.
+        if self.session_ttl_secs == Some(0) {
+            return Err(ConfigError::InvalidSessionTtl);
+        }
+
         Ok(())
+    }
+
+    /// Returns the effective SDK rate limit, in requests per minute.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_RATE_LIMIT_PER_MINUTE`](flaps_server::state::DEFAULT_RATE_LIMIT_PER_MINUTE)
+    /// when [`Self::rate_limit_per_minute`] is omitted.
+    #[must_use]
+    pub fn effective_rate_limit_per_minute(&self) -> u32 {
+        self.rate_limit_per_minute
+            .unwrap_or(flaps_server::state::DEFAULT_RATE_LIMIT_PER_MINUTE)
+    }
+
+    /// Returns the effective admin session TTL.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_SESSION_TTL_SECS`](flaps_server::state::DEFAULT_SESSION_TTL_SECS)
+    /// when [`Self::session_ttl_secs`] is omitted.
+    #[must_use]
+    pub fn effective_session_ttl(&self) -> Duration {
+        Duration::from_secs(
+            self.session_ttl_secs
+                .unwrap_or(flaps_server::state::DEFAULT_SESSION_TTL_SECS),
+        )
     }
 
     /// Returns the `bind_addr` parsed as a [`SocketAddr`].
@@ -248,6 +318,81 @@ bind_addr    = "127.0.0.1:8080"
         assert!(
             matches!(result, Err(ConfigError::Io(_))),
             "expected Io error"
+        );
+    }
+
+    // -- rate_limit_per_minute / session_ttl_secs --
+
+    #[test]
+    fn load_omitted_rate_limit_and_ttl_use_documented_defaults() {
+        let f = write_toml(
+            r#"
+database_url = "sqlite://flaps.db"
+bind_addr    = "127.0.0.1:8080"
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.rate_limit_per_minute, None);
+        assert_eq!(cfg.session_ttl_secs, None);
+        assert_eq!(
+            cfg.effective_rate_limit_per_minute(),
+            flaps_server::state::DEFAULT_RATE_LIMIT_PER_MINUTE,
+            "omitted rate_limit_per_minute must fall back to the documented default"
+        );
+        assert_eq!(
+            cfg.effective_session_ttl(),
+            std::time::Duration::from_secs(flaps_server::state::DEFAULT_SESSION_TTL_SECS),
+            "omitted session_ttl_secs must fall back to the documented default"
+        );
+    }
+
+    #[test]
+    fn load_explicit_rate_limit_and_ttl_are_applied() {
+        let f = write_toml(
+            r#"
+database_url          = "sqlite://flaps.db"
+bind_addr              = "127.0.0.1:8080"
+rate_limit_per_minute  = 5
+session_ttl_secs       = 120
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.effective_rate_limit_per_minute(), 5);
+        assert_eq!(
+            cfg.effective_session_ttl(),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn load_zero_rate_limit_returns_err() {
+        let f = write_toml(
+            r#"
+database_url          = "sqlite://flaps.db"
+bind_addr              = "127.0.0.1:8080"
+rate_limit_per_minute  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidRateLimit)),
+            "expected InvalidRateLimit for a zero rate_limit_per_minute, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_zero_session_ttl_returns_err() {
+        let f = write_toml(
+            r#"
+database_url     = "sqlite://flaps.db"
+bind_addr         = "127.0.0.1:8080"
+session_ttl_secs  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidSessionTtl)),
+            "expected InvalidSessionTtl for a zero session_ttl_secs, got {result:?}"
         );
     }
 

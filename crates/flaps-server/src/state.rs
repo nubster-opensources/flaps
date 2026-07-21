@@ -60,8 +60,27 @@ impl<T> Store for T where
 /// Compiled ruleset cache keyed by (project, environment).
 pub type CompiledCache = Arc<RwLock<HashMap<(ProjectKey, EnvironmentKey), CompiledRuleset>>>;
 
-/// Default session TTL (24 hours).
-const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
+/// Default session TTL in seconds (24 hours).
+///
+/// Shared with `flapsd_lib::config` so the documented default and the value
+/// actually applied by [`AppState::new`] cannot drift apart.
+pub const DEFAULT_SESSION_TTL_SECS: u64 = 24 * 3600;
+
+/// Default session TTL (24 hours), as a [`Duration`].
+const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(DEFAULT_SESSION_TTL_SECS);
+
+/// Default per-key SDK rate limit, in requests per minute.
+///
+/// Also used as the token-bucket burst capacity: a fresh key can consume its
+/// whole per-minute budget immediately, then refills gradually.
+pub const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 60;
+
+/// Default login rate limiter burst capacity (`POST /login`, keyed by username).
+pub const DEFAULT_LOGIN_RATE_LIMIT_CAPACITY: u32 = 5;
+
+/// Default login rate limiter refill rate, in tokens per second
+/// (~1 attempt every 10 seconds).
+pub const DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND: f64 = 0.1;
 
 /// Broadcast channel capacity for [`SyncEvent`] notifications.
 ///
@@ -108,20 +127,24 @@ impl<S: Store> AppState<S> {
             cache: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Arc::new(RateLimiter::new(crate::rate_limit::RateLimitConfig {
                 enabled: true,
-                capacity: 60,
-                refill_per_second: 1.0,
+                capacity: DEFAULT_RATE_LIMIT_PER_MINUTE,
+                refill_per_second: f64::from(DEFAULT_RATE_LIMIT_PER_MINUTE) / 60.0,
             })),
             login_rate_limiter: Arc::new(RateLimiter::new(crate::rate_limit::RateLimitConfig {
                 enabled: true,
-                capacity: 5,
-                refill_per_second: 0.1,
+                capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
+                refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
             })),
             session_ttl: DEFAULT_SESSION_TTL,
             events,
         }
     }
 
-    /// Builds app state with explicit configuration (used in tests and binary).
+    /// Builds app state with explicit configuration.
+    ///
+    /// Used by `flapsd_lib::config::Config` to apply the configured SDK rate
+    /// limit and session TTL for both the SQLite and PostgreSQL storage
+    /// backends, and by tests that need non-default limiter or TTL values.
     #[must_use]
     pub fn with_config(
         store: S,
