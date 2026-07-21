@@ -8,7 +8,6 @@ use open_feature::{
     EvaluationContext, EvaluationContextFieldValue, EvaluationError, EvaluationErrorCode,
     EvaluationResult, StructValue, Value as OpenFeatureValue,
 };
-use time::OffsetDateTime;
 
 /// Converts an OpenFeature evaluation context to a flaps-eval evaluation context.
 ///
@@ -75,22 +74,17 @@ fn field_to_json(
             serde_json::Number::from_f64(*f).map(serde_json::Value::Number)
         }
         EvaluationContextFieldValue::String(s) => Some(serde_json::Value::String(s.clone())),
-        EvaluationContextFieldValue::DateTime(dt) => Some(datetime_field_to_json(dt)),
+        EvaluationContextFieldValue::DateTime(dt) => {
+            // Wire representation: integer Unix timestamp in seconds. This is
+            // the CANONICAL wire representation for `DateTime` context
+            // fields: any future OFREP client-side serializer MUST encode
+            // `DateTime` fields the same way for remote/local evaluation
+            // results to stay in parity with the value produced here.
+            Some(serde_json::Value::Number(dt.unix_timestamp().into()))
+        }
         EvaluationContextFieldValue::Struct(opaque) => Some(struct_field_to_json(key, opaque)?),
     };
     Ok(json)
-}
-
-/// Converts a context `DateTime` field to its wire representation.
-///
-/// The wire representation is the integer Unix timestamp in seconds, i.e.
-/// [`OffsetDateTime::unix_timestamp`]. Integer Unix seconds is the CANONICAL
-/// wire representation for `DateTime` context fields: any future OFREP
-/// client-side serializer MUST encode `DateTime` fields the same way for
-/// remote/local evaluation results to stay in parity with the value produced
-/// here.
-fn datetime_field_to_json(dt: &OffsetDateTime) -> serde_json::Value {
-    serde_json::Value::Number(dt.unix_timestamp().into())
 }
 
 /// Converts an opaque `Struct` payload to JSON.
