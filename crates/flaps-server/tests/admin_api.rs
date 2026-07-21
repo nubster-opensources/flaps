@@ -1449,3 +1449,268 @@ async fn admin_read_endpoints_require_admin_session() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #110: child resources created under a missing parent return 404
+// ---------------------------------------------------------------------------
+
+fn post_sdk_key_req(proj: &str, env: &str, token: &str) -> Request<Body> {
+    let create_body = serde_json::json!({ "kind": "server" });
+    Request::builder()
+        .method("POST")
+        .uri(format!("/projects/{proj}/environments/{env}/keys"))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+        .unwrap()
+}
+
+fn list_sdk_keys_req(proj: &str, env: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("/projects/{proj}/environments/{env}/keys"))
+        .header("Authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Asserts a 404 problem+json response that never leaks a raw database error
+/// string (e.g. "FOREIGN KEY constraint failed", "UNIQUE constraint", or any
+/// SQL keyword) in the `detail` field.
+async fn assert_not_found_without_db_leak(resp: axum::response::Response) {
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    assert!(
+        ct.contains("problem+json"),
+        "404 body must be problem+json: {ct}"
+    );
+    let json = body_json(resp).await;
+    let detail = json["detail"].as_str().unwrap_or("");
+    assert_eq!(
+        detail, "The addressed resource does not exist.",
+        "404 detail must be the generic not-found message, never a raw store error"
+    );
+    let detail_lower = detail.to_lowercase();
+    assert!(
+        !detail_lower.contains("constraint")
+            && !detail_lower.contains("foreign key")
+            && !detail_lower.contains("sqlite")
+            && !detail_lower.contains("sqlx"),
+        "404 detail must not leak raw database error text: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn create_environment_under_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let env = bool_environment("orphan-env");
+
+    let resp = app
+        .clone()
+        .oneshot(put_env_req("no-such-project", "orphan-env", &env, &token))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_flag_under_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let flag = bool_flag("orphan-flag");
+
+    let resp = app
+        .clone()
+        .oneshot(put_flag_req(
+            "no-such-project",
+            "orphan-flag",
+            &flag,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_segment_under_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let segment = simple_segment("orphan-segment");
+
+    let resp = app
+        .clone()
+        .oneshot(put_segment_req(
+            "no-such-project",
+            "orphan-segment",
+            &segment,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_flag_env_config_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let config = simple_config("on");
+
+    let resp = app
+        .clone()
+        .oneshot(put_config_req(
+            "no-such-project",
+            "no-such-flag",
+            "no-such-env",
+            &config,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_flag_env_config_missing_flag_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let project = bool_project("fec-missing-flag-proj");
+    let env = bool_environment("fec-missing-flag-env");
+
+    app.clone()
+        .oneshot(put_project_req("fec-missing-flag-proj", &project, &token))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_env_req(
+            "fec-missing-flag-proj",
+            "fec-missing-flag-env",
+            &env,
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let config = simple_config("on");
+    let resp = app
+        .clone()
+        .oneshot(put_config_req(
+            "fec-missing-flag-proj",
+            "no-such-flag",
+            "fec-missing-flag-env",
+            &config,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_flag_env_config_missing_environment_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let project = bool_project("fec-missing-env-proj");
+    let flag = bool_flag("fec-missing-env-flag");
+
+    app.clone()
+        .oneshot(put_project_req("fec-missing-env-proj", &project, &token))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(put_flag_req(
+            "fec-missing-env-proj",
+            "fec-missing-env-flag",
+            &flag,
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let config = simple_config("on");
+    let resp = app
+        .clone()
+        .oneshot(put_config_req(
+            "fec-missing-env-proj",
+            "fec-missing-env-flag",
+            "no-such-env",
+            &config,
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_sdk_key_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_sdk_key_req("no-such-project", "no-such-env", &token))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn create_sdk_key_missing_environment_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let project = bool_project("sdk-missing-env-proj");
+
+    app.clone()
+        .oneshot(put_project_req("sdk-missing-env-proj", &project, &token))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_sdk_key_req(
+            "sdk-missing-env-proj",
+            "no-such-env",
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn list_sdk_keys_missing_project_returns_404() {
+    let (app, token) = make_authed_app().await;
+
+    let resp = app
+        .clone()
+        .oneshot(list_sdk_keys_req("no-such-project", "no-such-env", &token))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}
+
+#[tokio::test]
+async fn list_sdk_keys_missing_environment_returns_404() {
+    let (app, token) = make_authed_app().await;
+    let project = bool_project("list-sdk-missing-env-proj");
+
+    app.clone()
+        .oneshot(put_project_req(
+            "list-sdk-missing-env-proj",
+            &project,
+            &token,
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(list_sdk_keys_req(
+            "list-sdk-missing-env-proj",
+            "no-such-env",
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_not_found_without_db_leak(resp).await;
+}

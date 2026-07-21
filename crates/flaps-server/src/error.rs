@@ -38,7 +38,7 @@ impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::Conflict(msg) => Self::Conflict(msg),
-            StoreError::NotFound => Self::NotFound,
+            StoreError::NotFound | StoreError::ForeignKeyViolation => Self::NotFound,
             other => Self::Internal(other.to_string()),
         }
     }
@@ -105,13 +105,16 @@ impl IntoResponse for ApiError {
                 "Rate limit exceeded. Retry after the indicated delay.".to_owned(),
                 Some(*retry_after_seconds),
             ),
-            Self::Internal(msg) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal-error",
-                "Internal server error",
-                msg.as_str().to_owned(),
-                None,
-            ),
+            Self::Internal(msg) => {
+                tracing::error!(detail = %msg, "internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal-error",
+                    "Internal server error",
+                    "An internal error occurred.".to_owned(),
+                    None,
+                )
+            }
         };
 
         let body = json!({
@@ -137,5 +140,48 @@ impl IntoResponse for ApiError {
         builder
             .body(axum::body::Body::from(body_bytes))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http_body_util::BodyExt;
+
+    use super::{ApiError, IntoResponse};
+
+    /// The generic message returned to clients for any `Internal` error, regardless of
+    /// what the underlying store or driver error said.
+    const GENERIC_INTERNAL_MESSAGE: &str = "An internal error occurred.";
+
+    #[tokio::test]
+    async fn internal_error_response_never_leaks_raw_store_detail() {
+        let raw_detail = "database error: FOREIGN KEY constraint failed (constraint `fk_sdk_key_project`), \
+             sqlx sqlite driver, SQLSTATE 23503";
+        let response = ApiError::Internal(raw_detail.to_owned()).into_response();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let detail = body["detail"].as_str().unwrap();
+
+        assert_eq!(detail, GENERIC_INTERNAL_MESSAGE);
+
+        let lowered = detail.to_lowercase();
+        for forbidden in [
+            "constraint",
+            "foreign key",
+            "sqlite",
+            "sqlx",
+            "database error",
+        ] {
+            assert!(
+                !lowered.contains(forbidden),
+                "response detail leaked raw store text: {detail:?}"
+            );
+        }
     }
 }

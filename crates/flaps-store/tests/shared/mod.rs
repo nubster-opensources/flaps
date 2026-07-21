@@ -238,6 +238,8 @@ where
     // #55 flag and flag-set metadata.
     test_flag_metadata_round_trips(&store).await;
     test_environment_metadata_round_trips(&store).await;
+    // #110 typed foreign-key violation mapping.
+    test_foreign_key_violation_on_missing_parent(&store).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1588,6 +1590,127 @@ async fn test_flag_metadata_round_trips<S: ProjectRepository + FlagRepository>(s
         .find(|f| f.key == flag.key)
         .expect("flag must be in list");
     assert_eq!(listed_flag.metadata, flag.metadata);
+
+    store.delete_project("tester", &proj.key).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// #110 case: foreign_key_violation_on_missing_parent
+// ---------------------------------------------------------------------------
+
+/// Every write that references a parent entity must fail with the typed
+/// `StoreError::ForeignKeyViolation` variant (not the generic `Sqlx` wrapper)
+/// when that parent does not exist. This lets the API layer map the failure
+/// to a clean 404 instead of leaking a raw database error as a 500.
+async fn test_foreign_key_violation_on_missing_parent<
+    S: ProjectRepository
+        + EnvironmentRepository
+        + FlagRepository
+        + SegmentRepository
+        + FlagEnvConfigRepository
+        + SdkKeyRepository,
+>(
+    store: &S,
+) {
+    let missing_project = ProjectKey::new("fk-missing-project").unwrap();
+
+    let env_result = store
+        .upsert_environment("tester", &missing_project, &make_env("fk-env"))
+        .await;
+    assert!(
+        matches!(
+            env_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "upsert_environment under a missing project must return ForeignKeyViolation, got: {env_result:?}"
+    );
+
+    let flag_result = store
+        .upsert_flag("tester", &missing_project, &make_flag("fk-flag"))
+        .await;
+    assert!(
+        matches!(
+            flag_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "upsert_flag under a missing project must return ForeignKeyViolation, got: {flag_result:?}"
+    );
+
+    let segment_result = store
+        .upsert_segment("tester", &missing_project, &make_segment("fk-segment"))
+        .await;
+    assert!(
+        matches!(
+            segment_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "upsert_segment under a missing project must return ForeignKeyViolation, got: {segment_result:?}"
+    );
+
+    let sdk_key_missing_project_result = store
+        .create_sdk_key(
+            "tester",
+            "fk-missing-project-raw-key-12345",
+            &NewSdkKey {
+                kind: SdkKeyKind::Server,
+                scope: SdkKeyScope {
+                    project_key: missing_project.clone(),
+                    environment_key: EnvironmentKey::new("fk-env").unwrap(),
+                },
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            sdk_key_missing_project_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "create_sdk_key under a missing project must return ForeignKeyViolation, got: {sdk_key_missing_project_result:?}"
+    );
+
+    // A real project, but with a flag/environment pair that does not exist under it.
+    let proj = make_project("fk-parent-proj");
+    store.upsert_project("tester", &proj).await.unwrap();
+
+    let missing_flag = FlagKey::new("fk-missing-flag").unwrap();
+    let missing_env = EnvironmentKey::new("fk-missing-env").unwrap();
+    let config_result = store
+        .upsert_flag_env_config(
+            "tester",
+            &proj.key,
+            &missing_flag,
+            &missing_env,
+            &make_flag_env_config(),
+        )
+        .await;
+    assert!(
+        matches!(
+            config_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "upsert_flag_env_config with a missing flag/environment must return ForeignKeyViolation, got: {config_result:?}"
+    );
+
+    let sdk_key_result = store
+        .create_sdk_key(
+            "tester",
+            "fk-missing-env-raw-key-12345",
+            &NewSdkKey {
+                kind: SdkKeyKind::Server,
+                scope: SdkKeyScope {
+                    project_key: proj.key.clone(),
+                    environment_key: missing_env,
+                },
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            sdk_key_result,
+            Err(flaps_store::StoreError::ForeignKeyViolation)
+        ),
+        "create_sdk_key under a missing environment must return ForeignKeyViolation, got: {sdk_key_result:?}"
+    );
 
     store.delete_project("tester", &proj.key).await.unwrap();
 }

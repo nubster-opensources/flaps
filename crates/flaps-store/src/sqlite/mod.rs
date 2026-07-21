@@ -375,6 +375,9 @@ where
                 env.external_ref.as_ref().map_or("", |r| r.as_str())
             )))
         }
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            Err(StoreError::ForeignKeyViolation)
+        }
         Err(e) => Err(StoreError::Sqlx(e)),
     }
 }
@@ -389,7 +392,7 @@ where
     let metadata_json = serde_json::to_string(&flag.metadata)?;
     let now = crate::clock::now_rfc3339();
 
-    sqlx::query(
+    let result = sqlx::query(
         r"INSERT INTO flags (project_key, key, name, description, flag_type, value_type, variants_json, metadata_json, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(project_key, key) DO UPDATE SET
@@ -412,9 +415,15 @@ where
     .bind(&now)
     .bind(&now)
     .execute(executor)
-    .await?;
+    .await;
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            Err(StoreError::ForeignKeyViolation)
+        }
+        Err(e) => Err(StoreError::Sqlx(e)),
+    }
 }
 
 async fn do_upsert_segment<'e, E>(
@@ -428,7 +437,7 @@ where
     let match_json = serde_json::to_string(&segment.match_expr)?;
     let now = crate::clock::now_rfc3339();
 
-    sqlx::query(
+    let result = sqlx::query(
         r"INSERT INTO segments (project_key, key, name, match_json, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(project_key, key) DO UPDATE SET
@@ -443,9 +452,15 @@ where
     .bind(&now)
     .bind(&now)
     .execute(executor)
-    .await?;
+    .await;
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            Err(StoreError::ForeignKeyViolation)
+        }
+        Err(e) => Err(StoreError::Sqlx(e)),
+    }
 }
 
 async fn do_upsert_flag_env_config<'e, E>(
@@ -461,7 +476,7 @@ where
     let config_json = serde_json::to_string(config)?;
     let now = crate::clock::now_rfc3339();
 
-    sqlx::query(
+    let result = sqlx::query(
         r"INSERT INTO flag_env_configs (project_key, flag_key, environment_key, config_json, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?)
           ON CONFLICT(project_key, flag_key, environment_key) DO UPDATE SET
@@ -475,9 +490,15 @@ where
     .bind(&now)
     .bind(&now)
     .execute(executor)
-    .await?;
+    .await;
 
-    Ok(())
+    match result {
+        Ok(_) => Ok(()),
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+            Err(StoreError::ForeignKeyViolation)
+        }
+        Err(e) => Err(StoreError::Sqlx(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,7 +1092,7 @@ impl SdkKeyRepository for SqliteStore {
 
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query(
+        let insert_result = sqlx::query(
             r"INSERT INTO sdk_keys (key_hash, prefix, kind, project_key, environment_key, created_at)
               VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -1082,7 +1103,15 @@ impl SdkKeyRepository for SqliteStore {
         .bind(new_key.scope.environment_key.as_str())
         .bind(&now)
         .execute(&mut *tx)
-        .await?;
+        .await;
+
+        match insert_result {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => {
+                return Err(StoreError::ForeignKeyViolation);
+            }
+            Err(e) => return Err(StoreError::Sqlx(e)),
+        }
 
         // Audit the issuance, symmetrically to revocation, in the same transaction.
         let entity_id = format!(
