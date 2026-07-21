@@ -74,6 +74,16 @@ pub async fn put_flag<S: Store>(
         ));
     }
 
+    // The parent project must exist. Checking explicitly up front (rather than
+    // relying on the foreign-key violation the write would eventually raise)
+    // gives a clean 404 without compiling an empty ruleset for a new flag.
+    state
+        .store
+        .get_project(&project_key)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
     let existing = state
         .store
         .get_flag(&project_key, &flag_key)

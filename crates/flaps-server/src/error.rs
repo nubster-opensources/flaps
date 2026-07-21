@@ -38,7 +38,7 @@ impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::Conflict(msg) => Self::Conflict(msg),
-            StoreError::NotFound => Self::NotFound,
+            StoreError::NotFound | StoreError::ForeignKeyViolation => Self::NotFound,
             other => Self::Internal(other.to_string()),
         }
     }

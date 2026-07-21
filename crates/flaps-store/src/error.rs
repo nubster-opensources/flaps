@@ -18,6 +18,9 @@ pub enum StoreError {
     /// A uniqueness constraint was violated.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A write referenced a parent entity that does not exist (foreign-key violation).
+    #[error("referenced entity does not exist")]
+    ForeignKeyViolation,
 }
 
 /// Convenience alias for `Result<T, StoreError>`.

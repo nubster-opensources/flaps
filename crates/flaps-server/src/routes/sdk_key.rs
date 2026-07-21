@@ -50,6 +50,22 @@ pub async fn post_sdk_key<S: Store>(
     let environment =
         EnvironmentKey::new(env_str).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
+    // Both parents of the scope must exist. Checking explicitly up front (rather
+    // than relying on the foreign-key violation the write would eventually
+    // raise) gives a clean 404 for a key requested against a missing scope.
+    state
+        .store
+        .get_project(&project)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    state
+        .store
+        .get_environment(&project, &environment)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
     // Generate a raw key: prefix (kind letter) + 24 random bytes as hex.
     let raw_key = generate_sdk_key(body.kind);
 
@@ -85,6 +101,20 @@ pub async fn list_sdk_keys<S: Store>(
     let project = ProjectKey::new(project_str).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let environment =
         EnvironmentKey::new(env_str).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
+
+    // Both parents of the scope must exist; a missing scope has no keys to list.
+    state
+        .store
+        .get_project(&project)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    state
+        .store
+        .get_environment(&project, &environment)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
 
     let scope = SdkKeyScope {
         project_key: project,

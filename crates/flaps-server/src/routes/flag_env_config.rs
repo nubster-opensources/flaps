@@ -55,6 +55,28 @@ pub async fn put_flag_env_config<S: Store>(
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
+    // All three parents must exist. Checking explicitly up front (rather than
+    // relying on the foreign-key violation the write would eventually raise)
+    // gives a clean 404 without compiling an environment for a non-existent flag.
+    state
+        .store
+        .get_project(&project_key)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    state
+        .store
+        .get_flag(&project_key, &flag_key)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    state
+        .store
+        .get_environment(&project_key, &env_key)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
     let existing = state
         .store
         .get_flag_env_config(&project_key, &flag_key, &env_key)
