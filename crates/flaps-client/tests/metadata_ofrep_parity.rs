@@ -204,8 +204,15 @@ async fn fetch_ofrep_metadata(addr: SocketAddr) -> serde_json::Map<String, serde
 }
 
 /// Asserts that a raw OFREP JSON metadata scalar and the corresponding local
-/// `FlagMetadataValue` represent the same value, including the int/float
-/// distinction.
+/// `FlagMetadataValue` represent the same value AND the same type. For a
+/// JSON number, the OFREP wire form itself is the type oracle: an
+/// integer-form number (`Number::is_i64` or `Number::is_u64`, i.e. no
+/// fractional part) must correspond to a local `FlagMetadataValue::Int`, and
+/// a fractional-form number must correspond to a local `Float`. This is
+/// deliberately independent of which local variant happens to be present,
+/// so a genuine Int<->Float divergence between the OFREP mapper and the
+/// local mapper cannot hide behind an accidental value match (e.g. OFREP
+/// `2` vs local `Float(2.0)`).
 fn assert_entry_matches(
     key: &str,
     json_value: &serde_json::Value,
@@ -218,21 +225,39 @@ fn assert_entry_matches(
         (serde_json::Value::String(expected), FlagMetadataValue::String(actual)) => {
             assert_eq!(expected, actual, "key `{key}` string value mismatch");
         }
-        (serde_json::Value::Number(expected), FlagMetadataValue::Int(actual)) => {
-            assert_eq!(
-                expected.as_i64(),
-                Some(*actual),
-                "key `{key}` int value mismatch"
-            );
-        }
-        (serde_json::Value::Number(expected), FlagMetadataValue::Float(actual)) => {
-            let expected_f64 = expected
-                .as_f64()
-                .unwrap_or_else(|| panic!("key `{key}` OFREP number is not a valid f64"));
-            assert!(
-                (expected_f64 - actual).abs() < f64::EPSILON,
-                "key `{key}` float value mismatch: OFREP {expected_f64} vs local {actual}"
-            );
+        (serde_json::Value::Number(expected), _) => {
+            let is_integer_form = expected.is_i64() || expected.is_u64();
+            match (is_integer_form, local_value) {
+                (true, FlagMetadataValue::Int(actual)) => {
+                    assert_eq!(
+                        expected.as_i64(),
+                        Some(*actual),
+                        "key `{key}` int value mismatch"
+                    );
+                }
+                (false, FlagMetadataValue::Float(actual)) => {
+                    let expected_f64 = expected
+                        .as_f64()
+                        .unwrap_or_else(|| panic!("key `{key}` OFREP number is not a valid f64"));
+                    assert!(
+                        (expected_f64 - actual).abs() < f64::EPSILON,
+                        "key `{key}` float value mismatch: OFREP {expected_f64} vs local {actual}"
+                    );
+                }
+                (true, FlagMetadataValue::Float(actual)) => panic!(
+                    "key `{key}` int/float type divergence: OFREP carries an \
+                     integer-form number ({expected}) but local metadata carries \
+                     Float({actual})"
+                ),
+                (false, FlagMetadataValue::Int(actual)) => panic!(
+                    "key `{key}` int/float type divergence: OFREP carries a \
+                     fractional-form number ({expected}) but local metadata carries \
+                     Int({actual})"
+                ),
+                (_, other) => panic!(
+                    "key `{key}` type mismatch between OFREP number {expected} and local {other:?}"
+                ),
+            }
         }
         _ => panic!(
             "key `{key}` type mismatch between OFREP {json_value:?} and local {local_value:?}"
