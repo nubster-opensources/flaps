@@ -11,7 +11,7 @@ use flaps_domain::{ManagedBy, Project, ProjectKey};
 use crate::{
     auth::AdminPrincipal,
     error::ApiError,
-    etag::{check_if_match, check_if_none_match, compute_etag},
+    etag::{check_if_match, check_if_none_match, compute_etag, read_precondition_header},
     recompile::{Change, evict_project_from_cache, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
@@ -81,13 +81,11 @@ pub async fn put_project<S: Store>(
     let is_create = existing.is_none();
 
     let current_etag = existing.as_ref().map(compute_etag).transpose()?;
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, current_etag.as_deref())?;
+    let if_match = read_precondition_header(&headers, &header::IF_MATCH)?;
+    check_if_match(if_match.as_deref(), current_etag.as_deref())?;
 
-    let if_none_match = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok());
-    check_if_none_match(if_none_match, existing.is_some())?;
+    let if_none_match = read_precondition_header(&headers, &header::IF_NONE_MATCH)?;
+    check_if_none_match(if_none_match.as_deref(), existing.is_some())?;
 
     // Compile-as-validation: a clean 422 on invalid input, before any write.
     let rulesets = validate_by_compiling(&state, &project_key, &Change::UpsertProject).await?;
@@ -102,7 +100,7 @@ pub async fn put_project<S: Store>(
 
     // Recompile the affected environments from the just-committed store
     // state and install them, replacing any pre-write snapshot (#105).
-    recompile_committed(&state, &project_key, &affected).await?;
+    recompile_committed(&state, &project_key, &affected).await;
 
     // Build response.
     let etag = compute_etag(&body)?;
@@ -138,7 +136,7 @@ pub async fn delete_project<S: Store>(
     let actor = principal.username;
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
-    let _lock = state.lock_project(&project_key).await;
+    let lock = state.lock_project(&project_key).await;
 
     let existing = state
         .store
@@ -149,10 +147,15 @@ pub async fn delete_project<S: Store>(
     // Check If-Match before the existence check: a specific-ETag or `*`
     // precondition on a missing resource is a 412, not a 404 (RFC 7232 SS3.1).
     let current_etag = existing.as_ref().map(compute_etag).transpose()?;
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, current_etag.as_deref())?;
+    let if_match = read_precondition_header(&headers, &header::IF_MATCH)?;
+    check_if_match(if_match.as_deref(), current_etag.as_deref())?;
 
     if existing.is_none() {
+        // Release the mutation-lock registry entry for this (non-existent)
+        // project before returning: otherwise every distinct never-created
+        // key ever mentioned in a DELETE would permanently occupy an entry.
+        drop(lock);
+        state.release_project_lock_if_unused(&project_key);
         return Err(ApiError::NotFound);
     }
 
@@ -168,6 +171,11 @@ pub async fn delete_project<S: Store>(
 
     // Evict all (project, *) entries from cache.
     evict_project_from_cache(&state, &project_key).await;
+
+    // The project is gone: release its mutation-lock registry entry so a
+    // long-lived daemon does not accumulate one entry per deleted project.
+    drop(lock);
+    state.release_project_lock_if_unused(&project_key);
 
     Ok(StatusCode::NO_CONTENT)
 }

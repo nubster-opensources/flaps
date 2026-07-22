@@ -11,7 +11,7 @@ use flaps_domain::{Environment, EnvironmentKey, ManagedBy, ProjectKey};
 use crate::{
     auth::AdminPrincipal,
     error::ApiError,
-    etag::{check_if_match, check_if_none_match, compute_etag},
+    etag::{check_if_match, check_if_none_match, compute_etag, read_precondition_header},
     recompile::{Change, evict_environment_from_cache, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
@@ -75,17 +75,24 @@ pub async fn put_environment<S: Store>(
     }
 
     // Hold the per-project lock for the whole cycle (issues #105, #108).
-    let _lock = state.lock_project(&project_key).await;
+    let lock = state.lock_project(&project_key).await;
 
     // The parent project must exist. Checking explicitly up front (rather than
     // relying on the foreign-key violation the write would eventually raise)
     // gives a clean 404 without compiling an empty ruleset for a new environment.
-    state
+    let parent_exists = state
         .store
         .get_project(&project_key)
         .await
         .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        .is_some();
+    if !parent_exists {
+        // Release the registry entry: otherwise every distinct never-created
+        // project key ever mentioned in a PUT would permanently occupy one.
+        drop(lock);
+        state.release_project_lock_if_unused(&project_key);
+        return Err(ApiError::NotFound);
+    }
 
     let existing = state
         .store
@@ -95,13 +102,11 @@ pub async fn put_environment<S: Store>(
     let is_create = existing.is_none();
 
     let current_etag = existing.as_ref().map(compute_etag).transpose()?;
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, current_etag.as_deref())?;
+    let if_match = read_precondition_header(&headers, &header::IF_MATCH)?;
+    check_if_match(if_match.as_deref(), current_etag.as_deref())?;
 
-    let if_none_match = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok());
-    check_if_none_match(if_none_match, existing.is_some())?;
+    let if_none_match = read_precondition_header(&headers, &header::IF_NONE_MATCH)?;
+    check_if_none_match(if_none_match.as_deref(), existing.is_some())?;
 
     // Compile-as-validation: for a new environment there are no configs yet, which
     // means the compile succeeds with an empty flag set (valid).
@@ -115,7 +120,7 @@ pub async fn put_environment<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    recompile_committed(&state, &project_key, &affected).await?;
+    recompile_committed(&state, &project_key, &affected).await;
 
     let etag = compute_etag(&body)?;
     let status = if is_create {
@@ -150,7 +155,7 @@ pub async fn delete_environment<S: Store>(
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
-    let _lock = state.lock_project(&project_key).await;
+    let lock = state.lock_project(&project_key).await;
 
     let existing = state
         .store
@@ -159,10 +164,15 @@ pub async fn delete_environment<S: Store>(
         .map_err(ApiError::from)?;
 
     let current_etag = existing.as_ref().map(compute_etag).transpose()?;
-    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, current_etag.as_deref())?;
+    let if_match = read_precondition_header(&headers, &header::IF_MATCH)?;
+    check_if_match(if_match.as_deref(), current_etag.as_deref())?;
 
     if existing.is_none() {
+        // The environment (and, most likely, its parent project) does not
+        // exist: release the registry entry so repeated requests against a
+        // never-created project key do not leak one entry each.
+        drop(lock);
+        state.release_project_lock_if_unused(&project_key);
         return Err(ApiError::NotFound);
     }
 
