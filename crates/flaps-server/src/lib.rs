@@ -9,6 +9,7 @@ pub mod etag;
 pub mod rate_limit;
 pub mod recompile;
 pub mod routes;
+pub mod sse_quota;
 pub mod state;
 pub mod sync;
 

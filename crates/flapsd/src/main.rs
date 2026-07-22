@@ -14,6 +14,7 @@ use clap::Parser;
 use flaps_server::{
     build_router,
     rate_limit::{RateLimitConfig, RateLimiter},
+    sse_quota::{SseQuota, SseQuotaConfig},
     state::{AppState, Store},
 };
 use flaps_store::{KeyHasher, sqlite::SqliteStore};
@@ -110,10 +111,13 @@ pub async fn run(config_path: String) -> Result<()> {
 /// Builds application state from the daemon configuration.
 ///
 /// Applies [`Config::effective_rate_limit_per_minute`] to the SDK rate
-/// limiter and [`Config::effective_session_ttl`] to the admin session TTL,
-/// for both the SQLite and PostgreSQL storage backends. The login rate
-/// limiter is not operator-configurable: it keeps the documented default
-/// (see [`flaps_server::state::DEFAULT_LOGIN_RATE_LIMIT_CAPACITY`]).
+/// limiter, [`Config::effective_session_ttl`] to the admin session TTL, and
+/// [`Config::effective_max_sse_subscriptions_per_key`] /
+/// [`Config::effective_max_sse_subscriptions_global`] to the `GET
+/// /sync/v1/events` concurrency quota, for both the SQLite and PostgreSQL
+/// storage backends. The login rate limiter is not operator-configurable: it
+/// keeps the documented default (see
+/// [`flaps_server::state::DEFAULT_LOGIN_RATE_LIMIT_CAPACITY`]).
 fn build_app_state<S: Store>(store: S, config: &Config) -> AppState<S> {
     let rate_limit_per_minute = config.effective_rate_limit_per_minute();
     let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig {
@@ -126,6 +130,10 @@ fn build_app_state<S: Store>(store: S, config: &Config) -> AppState<S> {
         capacity: flaps_server::state::DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
         refill_per_second: flaps_server::state::DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
     }));
+    let sse_quota = Arc::new(SseQuota::new(SseQuotaConfig {
+        max_global: config.effective_max_sse_subscriptions_global(),
+        max_per_key: config.effective_max_sse_subscriptions_per_key(),
+    }));
 
     AppState::with_config(
         store,
@@ -133,6 +141,7 @@ fn build_app_state<S: Store>(store: S, config: &Config) -> AppState<S> {
         login_rate_limiter,
         config.effective_session_ttl(),
     )
+    .with_sse_quota(sse_quota)
 }
 
 /// Logs the effective, non-secret configuration values at startup.
@@ -145,6 +154,8 @@ fn log_effective_config(config: &Config) {
         admin_username = %config.admin_username,
         rate_limit_per_minute = config.effective_rate_limit_per_minute(),
         session_ttl_secs = config.effective_session_ttl().as_secs(),
+        max_sse_subscriptions_per_key = config.effective_max_sse_subscriptions_per_key(),
+        max_sse_subscriptions_global = config.effective_max_sse_subscriptions_global(),
         "effective flapsd configuration"
     );
 }
@@ -205,6 +216,8 @@ mod tests {
             admin_username: "admin".to_owned(),
             rate_limit_per_minute,
             session_ttl_secs,
+            max_sse_subscriptions_per_key: None,
+            max_sse_subscriptions_global: None,
         }
     }
 
@@ -338,6 +351,56 @@ mod tests {
         }
     }
 
+    // -- build_app_state: max_sse_subscriptions_per_key / _global --
+
+    /// Proves `max_sse_subscriptions_per_key` configures the SSE concurrency
+    /// quota through the actual router: a second concurrent `GET
+    /// /sync/v1/events` for the same key is rejected once the configured
+    /// ceiling of 1 is reached.
+    #[tokio::test]
+    async fn max_sse_subscriptions_per_key_is_enforced_through_router() {
+        let store = make_store().await;
+        let sdk_key = seed_sdk_key(&store).await;
+
+        let mut config = base_config(None, None);
+        config.max_sse_subscriptions_per_key = Some(1);
+        let state = build_app_state(store, &config);
+        let app = build_router(state);
+
+        let events_request = || {
+            Request::builder()
+                .method("GET")
+                .uri("/sync/v1/events")
+                .header("Authorization", format!("Bearer {sdk_key}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.clone().oneshot(events_request()),
+        )
+        .await
+        .expect("first subscription must not hang")
+        .unwrap();
+        assert_eq!(first.status(), StatusCode::OK, "first subscription");
+
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.clone().oneshot(events_request()),
+        )
+        .await
+        .expect("second subscription must not hang")
+        .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second concurrent subscription must be rejected by the configured per-key ceiling of 1"
+        );
+
+        drop(first);
+    }
+
     // -- build_app_state: session_ttl_secs --
 
     /// Proves `session_ttl_secs` controls newly minted admin session
@@ -443,6 +506,8 @@ mod tests {
             admin_username: "admin".to_owned(),
             rate_limit_per_minute: Some(5),
             session_ttl_secs: Some(120),
+            max_sse_subscriptions_per_key: Some(3),
+            max_sse_subscriptions_global: Some(50),
         };
 
         tracing::subscriber::with_default(subscriber, || {
@@ -457,6 +522,14 @@ mod tests {
         assert!(
             output.contains("session_ttl_secs") && output.contains("120"),
             "log must expose the effective session_ttl_secs, got: {output}"
+        );
+        assert!(
+            output.contains("max_sse_subscriptions_per_key") && output.contains('3'),
+            "log must expose the effective max_sse_subscriptions_per_key, got: {output}"
+        );
+        assert!(
+            output.contains("max_sse_subscriptions_global") && output.contains("50"),
+            "log must expose the effective max_sse_subscriptions_global, got: {output}"
         );
         assert!(
             !output.contains("super-secret-password"),

@@ -16,6 +16,9 @@
 //! observe a version that is equal to or greater than the one announced in the
 //! event; it can never see a stale entry.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -26,13 +29,14 @@ use axum::{
 };
 use flaps_domain::{EnvironmentKey, ProjectKey, SdkKeyKind};
 use serde::Serialize;
-use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 
 use crate::{
     auth::SdkKeyPrincipal,
     error::ApiError,
-    state::{AppState, Store},
+    sse_quota::{SseQuotaError, SseSubscriptionGuard},
+    state::{AppState, SSE_QUOTA_RETRY_AFTER_SECS, Store},
 };
 
 // ---------------------------------------------------------------------------
@@ -179,6 +183,40 @@ pub async fn get_ruleset<S: Store>(
 }
 
 // ---------------------------------------------------------------------------
+// Quota-bound stream (issue #111)
+// ---------------------------------------------------------------------------
+
+/// A boxed, type-erased SSE event stream.
+///
+/// `Pin<Box<dyn Stream<...>>>` is `Unpin` (a `Box` is unconditionally
+/// `Unpin`), which lets [`QuotaBoundStream`] implement [`Stream`] with a
+/// plain `&mut self` projection instead of requiring `unsafe` pin
+/// projection or an extra `pin-project` dependency.
+type BoxedEventStream = Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>>;
+
+/// Bundles the filtered SSE event stream together with the subscription
+/// quota permits ([`SseSubscriptionGuard`]) held for its lifetime.
+///
+/// `_permit` is never read: it exists purely so `Drop` releases the global
+/// and per-key permits the moment this value is dropped. That single
+/// mechanism covers every release path -  normal client disconnect, client
+/// cancellation, and server shutdown - because axum drops the response body
+/// (and therefore this stream) in every one of those cases. No explicit
+/// completion callback is needed or used.
+struct QuotaBoundStream {
+    inner: BoxedEventStream,
+    _permit: SseSubscriptionGuard,
+}
+
+impl Stream for QuotaBoundStream {
+    type Item = Result<Event, std::convert::Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SSE handler
 // ---------------------------------------------------------------------------
 
@@ -196,10 +234,23 @@ pub async fn get_ruleset<S: Store>(
 /// skipped silently. The client should re-sync via `GET /sync/v1/ruleset` after
 /// reconnecting.
 ///
+/// ## Concurrency quota (issue #111)
+/// Active subscriptions are bounded per SDK key and globally by
+/// [`AppState::sse_quota`], to stop a compromised key, a reconnect storm, or a
+/// defective client from holding an unbounded number of long-lived streams.
+/// The check is non-blocking: an over-quota request is rejected immediately
+/// rather than queued.
+///
 /// ## Status codes
 /// - 200: SSE stream opened successfully.
 /// - 401: missing or invalid SDK key.
 /// - 403: client-kind SDK key.
+/// - 429: the per-key or global concurrent-subscription quota is exhausted.
+///   `Retry-After` is set (see
+///   [`crate::state::SSE_QUOTA_RETRY_AFTER_SECS`]).
+///   This endpoint does not apply the ordinary per-request rate limiter, so a
+///   429 here always means the concurrency quota. Clients should back off
+///   (e.g. full-jitter exponential backoff) rather than reconnect immediately.
 pub async fn get_events<S: Store>(
     State(state): State<AppState<S>>,
     principal: Result<SdkKeyPrincipal, (StatusCode, ApiError)>,
@@ -210,12 +261,49 @@ pub async fn get_events<S: Store>(
     // 2. Server-key only.
     require_server_key(principal.kind)?;
 
-    // 3. Subscribe BEFORE releasing the principal (no async gap).
+    // 3. Acquire the subscription quota BEFORE subscribing: a rejected
+    //    attempt must never create a broadcast receiver.
+    let permit = state
+        .sse_quota
+        .try_acquire(&principal.prefix)
+        .map_err(|reason| {
+            // Report the active count and limit THAT ACTUALLY EXPLAIN this
+            // rejection reason: a `PerKeyLimitReached` line must show the
+            // per-key count against the per-key limit, not the unrelated
+            // global count against no limit at all, which reads as a
+            // contradiction (for example "active_subscriptions=7" next to a
+            // global limit of 1000).
+            let (active, limit) = match reason {
+                SseQuotaError::GlobalLimitReached => (
+                    state.sse_quota.active_subscriptions(),
+                    state.sse_quota.max_global(),
+                ),
+                SseQuotaError::PerKeyLimitReached => (
+                    state
+                        .sse_quota
+                        .active_subscriptions_for_key(&principal.prefix),
+                    state.sse_quota.max_per_key(),
+                ),
+            };
+            tracing::warn!(
+                key_prefix = %principal.prefix,
+                ?reason,
+                active_subscriptions = active,
+                limit,
+                rejected_subscriptions_total = state.sse_quota.rejected_subscriptions(),
+                "sse subscription rejected: concurrency quota exceeded"
+            );
+            ApiError::TooManyRequests {
+                retry_after_seconds: SSE_QUOTA_RETRY_AFTER_SECS,
+            }
+        })?;
+
+    // 4. Subscribe BEFORE releasing the principal (no async gap).
     let rx = state.events.subscribe();
     let scope_project = principal.scope.project_key.clone();
     let scope_env = principal.scope.environment_key.clone();
 
-    // 4. Build the filtered event stream.
+    // 5. Build the filtered event stream.
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         match result {
             // Lagged: skip, do not terminate the stream.
@@ -236,7 +324,14 @@ pub async fn get_events<S: Store>(
         }
     });
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    // 6. The quota permit is moved into the stream: dropping the response
+    //    body (for any reason) drops this value and releases the permit.
+    let bound_stream = QuotaBoundStream {
+        inner: Box::pin(stream),
+        _permit: permit,
+    };
+
+    Ok(Sse::new(bound_stream).keep_alive(KeepAlive::default()))
 }
 
 // ---------------------------------------------------------------------------

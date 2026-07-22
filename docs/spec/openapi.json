@@ -1136,7 +1136,7 @@
     "/sync/v1/events": {
       "get": {
         "summary": "Server-sent events stream of ruleset change notifications",
-        "description": "Server-key only: a client-kind key receives 403. See api-v1.md for the full notify-then-fetch SSE contract; text/event-stream is not modeled in detail by OpenAPI.",
+        "description": "Server-key only: a client-kind key receives 403. Bounded by a separate concurrency quota (global and per-key) that rejects excess concurrent subscriptions with 429, distinct from the ordinary request rate limiter. See api-v1.md for the full notify-then-fetch SSE contract and the concurrency quota; text/event-stream is not modeled in detail by OpenAPI.",
         "operationId": "getEvents",
         "security": [{ "sdkKey": [] }],
         "responses": {
@@ -1146,6 +1146,7 @@
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/ForbiddenServerKeyOnly" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
           "500": { "$ref": "#/components/responses/InternalError" }
         }
       }

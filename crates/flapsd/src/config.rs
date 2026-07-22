@@ -54,6 +54,28 @@ pub struct Config {
     /// [`ConfigError::InvalidSessionTtl`]: a session that expires immediately
     /// is never useful.
     pub session_ttl_secs: Option<u64>,
+
+    /// Per-key ceiling for concurrent `GET /sync/v1/events` SSE subscriptions
+    /// (default:
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    /// when omitted).
+    ///
+    /// Use [`Config::effective_max_sse_subscriptions_per_key`] to read the
+    /// value with the default applied. A zero value is rejected by
+    /// [`Config::load`] as [`ConfigError::InvalidMaxSseSubscriptionsPerKey`]:
+    /// a quota that admits zero connections has no "unbounded" meaning, it
+    /// simply locks every key out of the sync stream.
+    pub max_sse_subscriptions_per_key: Option<usize>,
+
+    /// Global ceiling for concurrent `GET /sync/v1/events` SSE subscriptions,
+    /// across every SDK key (default:
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
+    /// when omitted).
+    ///
+    /// Use [`Config::effective_max_sse_subscriptions_global`] to read the
+    /// value with the default applied. A zero value is rejected by
+    /// [`Config::load`] as [`ConfigError::InvalidMaxSseSubscriptionsGlobal`].
+    pub max_sse_subscriptions_global: Option<usize>,
 }
 
 /// Errors that can occur when loading or validating the configuration.
@@ -99,6 +121,52 @@ pub enum ConfigError {
         flaps_server::state::DEFAULT_SESSION_TTL_SECS
     )]
     InvalidSessionTtl,
+
+    /// `max_sse_subscriptions_per_key` is set to zero.
+    #[error(
+        "invalid max_sse_subscriptions_per_key: must be greater than zero (omit the field to \
+         use the default of {} subscriptions)",
+        flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY
+    )]
+    InvalidMaxSseSubscriptionsPerKey,
+
+    /// `max_sse_subscriptions_global` is set to zero.
+    #[error(
+        "invalid max_sse_subscriptions_global: must be greater than zero (omit the field to \
+         use the default of {} subscriptions)",
+        flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL
+    )]
+    InvalidMaxSseSubscriptionsGlobal,
+
+    /// `max_sse_subscriptions_per_key` exceeds what a `tokio::sync::Semaphore`
+    /// can hold. Left unrejected, this value would pass startup validation and
+    /// then panic inside `SseQuota::try_acquire`'s critical section on the
+    /// first SSE request, poisoning its mutex and 500-ing the endpoint for
+    /// every subsequent request.
+    #[error(
+        "invalid max_sse_subscriptions_per_key: {value} exceeds the maximum value a semaphore \
+         can hold ({}); this would panic on first use rather than a value this large having \
+         any practical \"unbounded\" meaning",
+        tokio::sync::Semaphore::MAX_PERMITS
+    )]
+    InvalidMaxSseSubscriptionsPerKeyTooLarge {
+        /// The rejected value.
+        value: usize,
+    },
+
+    /// `max_sse_subscriptions_global` exceeds what a `tokio::sync::Semaphore`
+    /// can hold. See [`Self::InvalidMaxSseSubscriptionsPerKeyTooLarge`] for
+    /// why this is rejected rather than left to panic later.
+    #[error(
+        "invalid max_sse_subscriptions_global: {value} exceeds the maximum value a semaphore \
+         can hold ({}); this would panic on first use rather than a value this large having \
+         any practical \"unbounded\" meaning",
+        tokio::sync::Semaphore::MAX_PERMITS
+    )]
+    InvalidMaxSseSubscriptionsGlobalTooLarge {
+        /// The rejected value.
+        value: usize,
+    },
 }
 
 impl Config {
@@ -154,6 +222,30 @@ impl Config {
             return Err(ConfigError::InvalidSessionTtl);
         }
 
+        // Validate the SSE subscription quotas: zero has no "unbounded"
+        // meaning, it simply locks every key out of the sync stream. The
+        // upper bound mirrors `tokio::sync::Semaphore::MAX_PERMITS`: past
+        // that, `Semaphore::new` panics, and for `max_sse_subscriptions_per_key`
+        // specifically that panic happens lazily, inside a mutex critical
+        // section on the first SSE request, poisoning it (see
+        // `flaps_server::sse_quota::SseQuota::try_acquire`).
+        if let Some(value) = self.max_sse_subscriptions_per_key {
+            if value == 0 {
+                return Err(ConfigError::InvalidMaxSseSubscriptionsPerKey);
+            }
+            if value > tokio::sync::Semaphore::MAX_PERMITS {
+                return Err(ConfigError::InvalidMaxSseSubscriptionsPerKeyTooLarge { value });
+            }
+        }
+        if let Some(value) = self.max_sse_subscriptions_global {
+            if value == 0 {
+                return Err(ConfigError::InvalidMaxSseSubscriptionsGlobal);
+            }
+            if value > tokio::sync::Semaphore::MAX_PERMITS {
+                return Err(ConfigError::InvalidMaxSseSubscriptionsGlobalTooLarge { value });
+            }
+        }
+
         Ok(())
     }
 
@@ -179,6 +271,28 @@ impl Config {
             self.session_ttl_secs
                 .unwrap_or(flaps_server::state::DEFAULT_SESSION_TTL_SECS),
         )
+    }
+
+    /// Returns the effective per-key SSE subscription ceiling.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    /// when [`Self::max_sse_subscriptions_per_key`] is omitted.
+    #[must_use]
+    pub fn effective_max_sse_subscriptions_per_key(&self) -> usize {
+        self.max_sse_subscriptions_per_key
+            .unwrap_or(flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    }
+
+    /// Returns the effective global SSE subscription ceiling.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
+    /// when [`Self::max_sse_subscriptions_global`] is omitted.
+    #[must_use]
+    pub fn effective_max_sse_subscriptions_global(&self) -> usize {
+        self.max_sse_subscriptions_global
+            .unwrap_or(flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
     }
 
     /// Returns the `bind_addr` parsed as a [`SocketAddr`].
@@ -394,6 +508,148 @@ session_ttl_secs  = 0
             matches!(result, Err(ConfigError::InvalidSessionTtl)),
             "expected InvalidSessionTtl for a zero session_ttl_secs, got {result:?}"
         );
+    }
+
+    // -- max_sse_subscriptions_per_key / max_sse_subscriptions_global --
+
+    #[test]
+    fn load_omitted_sse_quota_uses_documented_defaults() {
+        let f = write_toml(
+            r#"
+database_url = "sqlite://flaps.db"
+bind_addr    = "127.0.0.1:8080"
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.max_sse_subscriptions_per_key, None);
+        assert_eq!(cfg.max_sse_subscriptions_global, None);
+        assert_eq!(
+            cfg.effective_max_sse_subscriptions_per_key(),
+            flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
+            "omitted max_sse_subscriptions_per_key must fall back to the documented default"
+        );
+        assert_eq!(
+            cfg.effective_max_sse_subscriptions_global(),
+            flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
+            "omitted max_sse_subscriptions_global must fall back to the documented default"
+        );
+    }
+
+    #[test]
+    fn load_explicit_sse_quota_is_applied() {
+        let f = write_toml(
+            r#"
+database_url                    = "sqlite://flaps.db"
+bind_addr                        = "127.0.0.1:8080"
+max_sse_subscriptions_per_key   = 3
+max_sse_subscriptions_global    = 50
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.effective_max_sse_subscriptions_per_key(), 3);
+        assert_eq!(cfg.effective_max_sse_subscriptions_global(), 50);
+    }
+
+    #[test]
+    fn load_zero_max_sse_subscriptions_per_key_returns_err() {
+        let f = write_toml(
+            r#"
+database_url                   = "sqlite://flaps.db"
+bind_addr                       = "127.0.0.1:8080"
+max_sse_subscriptions_per_key  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidMaxSseSubscriptionsPerKey)),
+            "expected InvalidMaxSseSubscriptionsPerKey, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_zero_max_sse_subscriptions_global_returns_err() {
+        let f = write_toml(
+            r#"
+database_url                  = "sqlite://flaps.db"
+bind_addr                      = "127.0.0.1:8080"
+max_sse_subscriptions_global  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidMaxSseSubscriptionsGlobal)),
+            "expected InvalidMaxSseSubscriptionsGlobal, got {result:?}"
+        );
+    }
+
+    // -- upper bound: values a `tokio::sync::Semaphore` cannot hold --
+    //
+    // `Semaphore::new` panics when `permits > Semaphore::MAX_PERMITS`
+    // (`usize::MAX >> 3`). An absurd config value must fail `Config::load`
+    // cleanly, never reach `Semaphore::new`, and never panic. The chosen
+    // value fits in TOML's signed 64-bit integer range (below `i64::MAX`)
+    // while exceeding `Semaphore::MAX_PERMITS`, so it exercises the
+    // validation path rather than a TOML integer-overflow parse error.
+    const TOML_REPRESENTABLE_VALUE_ABOVE_MAX_PERMITS: u64 = 9_000_000_000_000_000_000;
+
+    #[test]
+    fn load_excessive_max_sse_subscriptions_per_key_returns_err_without_panicking() {
+        let fixture_value = usize::try_from(TOML_REPRESENTABLE_VALUE_ABOVE_MAX_PERMITS)
+            .expect("fixture value must fit in usize on this platform");
+        assert!(
+            fixture_value > tokio::sync::Semaphore::MAX_PERMITS,
+            "test fixture must exceed Semaphore::MAX_PERMITS to be meaningful"
+        );
+        let f = write_toml(&format!(
+            r#"
+database_url                   = "sqlite://flaps.db"
+bind_addr                       = "127.0.0.1:8080"
+max_sse_subscriptions_per_key  = {TOML_REPRESENTABLE_VALUE_ABOVE_MAX_PERMITS}
+"#,
+        ));
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidMaxSseSubscriptionsPerKeyTooLarge { .. })
+            ),
+            "expected InvalidMaxSseSubscriptionsPerKeyTooLarge, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_excessive_max_sse_subscriptions_global_returns_err_without_panicking() {
+        let f = write_toml(&format!(
+            r#"
+database_url                  = "sqlite://flaps.db"
+bind_addr                      = "127.0.0.1:8080"
+max_sse_subscriptions_global  = {TOML_REPRESENTABLE_VALUE_ABOVE_MAX_PERMITS}
+"#,
+        ));
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(
+                result,
+                Err(ConfigError::InvalidMaxSseSubscriptionsGlobalTooLarge { .. })
+            ),
+            "expected InvalidMaxSseSubscriptionsGlobalTooLarge, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_max_sse_subscriptions_at_the_boundary_is_accepted() {
+        // `Semaphore::MAX_PERMITS` itself must remain valid: the boundary is
+        // "exceeds", not "reaches".
+        let max = tokio::sync::Semaphore::MAX_PERMITS;
+        let f = write_toml(&format!(
+            r#"
+database_url                   = "sqlite://flaps.db"
+bind_addr                       = "127.0.0.1:8080"
+max_sse_subscriptions_per_key  = {max}
+"#,
+        ));
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("boundary value must load");
+        assert_eq!(cfg.effective_max_sse_subscriptions_per_key(), max);
     }
 
     // -- read_pepper --

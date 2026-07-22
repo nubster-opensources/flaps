@@ -30,19 +30,24 @@ On first start `flapsd` bootstraps an admin account and prints its credentials o
 | `admin_username` | `"admin"` | first-boot admin account |
 | `rate_limit_per_minute` | `60` | SDK request budget per key, applied to both storage backends |
 | `session_ttl_secs` | `86400` (24h) | admin session lifetime, minted by `POST /login` |
+| `max_sse_subscriptions_per_key` | `5` | ceiling on concurrent `GET /sync/v1/events` subscriptions for a single SDK key |
+| `max_sse_subscriptions_global` | `1000` | ceiling on concurrent `GET /sync/v1/events` subscriptions across every SDK key |
 
 ```toml
 # flapsd.toml
-database_url          = "sqlite://flaps.db"
-bind_addr              = "127.0.0.1:8080"
-rate_limit_per_minute  = 120
-session_ttl_secs       = 3600
+database_url                    = "sqlite://flaps.db"
+bind_addr                        = "127.0.0.1:8080"
+rate_limit_per_minute            = 120
+session_ttl_secs                 = 3600
+max_sse_subscriptions_per_key   = 10
+max_sse_subscriptions_global    = 2000
 ```
 
-Both `rate_limit_per_minute` and `session_ttl_secs` must be greater than zero
-when set; omit them to keep the defaults. A zero value fails configuration
-validation at startup, before `flapsd` connects to the store. The effective
-values are logged at startup; the database URL and HMAC pepper are not.
+`rate_limit_per_minute`, `session_ttl_secs`, `max_sse_subscriptions_per_key`
+and `max_sse_subscriptions_global` must all be greater than zero when set;
+omit them to keep the defaults. A zero value fails configuration validation
+at startup, before `flapsd` connects to the store. The effective values are
+logged at startup; the database URL and HMAC pepper are not.
 
 ## Create a flag through the admin API
 

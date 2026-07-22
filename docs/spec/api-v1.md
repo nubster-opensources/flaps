@@ -113,6 +113,32 @@ the event stream.
   periodic re-sync via `GET /sync/v1/ruleset` will catch up regardless of how
   many intermediate versions it missed.
 
+### 3.4 Concurrency quota
+
+`GET /sync/v1/events` opens a long-lived connection, so it is bounded
+separately from the ordinary per-request token bucket, which only limits the
+rate of new requests and does not bound resources held for the lifetime of a
+stream: a compromised key, a reconnect storm, or a defective client could
+otherwise hold an unbounded number of open connections.
+
+Two ceilings apply, checked in this order:
+
+1. A global ceiling, shared across every SDK key.
+2. A per-key ceiling, scoped to the caller's own SDK key prefix.
+
+Both are non-blocking: an over-quota request never queues, it is rejected
+immediately with `429 Too Many Requests`, the same status, `Retry-After`
+header, and `problem+json` body shape used by the ordinary rate limiter (see
+section 5 and 6.1). This endpoint does not additionally apply the token
+bucket, so a `429` from `/sync/v1/events` always means the concurrency quota,
+never the request rate.
+
+Clients should treat a `429` here as a signal to back off (e.g. full-jitter
+exponential backoff on the reconnect loop) rather than reconnect immediately;
+reconnecting in a tight loop only prolongs the quota being exhausted. A slot
+frees as soon as any held connection closes, for any reason (client
+disconnect, client-initiated cancellation, or server shutdown).
+
 ## 4. ETag and conditional requests
 
 flaps uses strong ETags computed as the hex SHA-256 of the canonical
@@ -156,7 +182,7 @@ avoids re-serializing and re-transferring it.
 | `ETag` | Admin single-resource GET/PUT 200/201; OFREP bulk 200; sync ruleset 200 | Strong ETag of the returned resource, see section 4. |
 | `X-Flaps-Version` | Sync ruleset 200 | Monotone version counter of the compiled ruleset, matches the `version` field a subsequent SSE `EventPayload` would announce. |
 | `X-Flaps-Warning` | Project/Environment PUT 200/201, only when `managed_by` is `federated` | Warns that the edit may be overwritten by the next federation sync; Flag, Segment and FlagEnvConfig carry no `managed_by` field and never set this header. |
-| `Retry-After` | Any `429` response | Seconds to wait before retrying, per the token-bucket rate limiter. |
+| `Retry-After` | Any `429` response | Seconds to wait before retrying: computed by the token-bucket rate limiter, or a fixed documented value for the `/sync/v1/events` concurrency quota (see 3.4). |
 
 ## 6. Errors
 

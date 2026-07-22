@@ -4,17 +4,24 @@
 //! 1. Opening `GET /sync/v1/events` (SSE stream).
 //! 2. Fetching the ruleset immediately on (re)connect.
 //! 3. Fetching again on each SSE notification.
-//! 4. Falling back to a periodic poll every `poll_interval` when SSE is connected.
-//! 5. Reconnecting with full-jitter backoff when the SSE stream drops.
+//! 4. Falling back to a periodic poll every `poll_interval`, running
+//!    unconditionally rather than only while SSE is connected. A client that
+//!    cannot hold an SSE subscription (for instance because the server's
+//!    concurrency quota permanently rejects it) must still degrade to
+//!    polling instead of freezing on the ruleset last observed.
+//! 5. Reconnecting with full-jitter backoff when the SSE stream drops or
+//!    fails to open; the poll cadence runs independently of that backoff, so
+//!    a slow reconnect schedule never delays a due poll.
 //!
 //! The task is stopped by `JoinHandle::abort()` from `Drop for FlapsProvider`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{Interval, MissedTickBehavior, interval};
 use tracing::warn;
 
 use crate::backoff::Backoff;
@@ -56,6 +63,16 @@ async fn run_supervisor(
     )
     .await;
 
+    // The poll interval is created once, outside the connect/reconnect loop,
+    // and ticked unconditionally: whether SSE is connected, disconnected, or
+    // permanently rejected by the server has no bearing on it. Hoisting it
+    // out of the `Ok` connect arm is what lets a quota-rejected client (see
+    // issue #111) still observe ruleset changes.
+    let mut poll_tick = poll_interval(config.poll_interval);
+    // The first tick fires immediately; skip it to avoid a double fetch right
+    // after the initial fetch above.
+    poll_tick.tick().await;
+
     loop {
         // Attempt to open the SSE stream.
         match open_event_stream(&client, &config.base_url, &config.sdk_key).await {
@@ -72,10 +89,6 @@ async fn run_supervisor(
                     snapshot_path,
                 )
                 .await;
-
-                let mut poll_tick = interval(config.poll_interval);
-                // The first tick fires immediately; skip it to avoid a double fetch.
-                poll_tick.tick().await;
 
                 let mut decoder = SseDecoder::new();
 
@@ -125,10 +138,50 @@ async fn run_supervisor(
             }
         }
 
-        // Backoff before next reconnect attempt.
+        // Backoff before the next reconnect attempt. The poll fallback keeps
+        // ticking on its own cadence while this wait elapses (`select!`
+        // below), so a client stuck in this arm - for instance because the
+        // server durably rejects its SSE subscription - still refreshes the
+        // ruleset on schedule instead of freezing until reconnection
+        // succeeds. The wait duration itself is untouched: the CONNECT
+        // backoff and the poll cadence are driven independently.
         let delay = backoff.next_delay();
-        tokio::time::sleep(delay).await;
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => break,
+                _ = poll_tick.tick() => {
+                    fetch_and_store(
+                        &client,
+                        &config.base_url,
+                        &config.sdk_key,
+                        &shared,
+                        snapshot_path,
+                    )
+                    .await;
+                }
+            }
+        }
     }
+}
+
+/// Builds the polling-fallback interval used by [`run_supervisor`].
+///
+/// Sets [`MissedTickBehavior::Delay`], overriding `tokio::time::interval`'s
+/// default of `Burst`. This interval is a periodic refresh fallback that
+/// wants "fetch at most every `period`", never a catch-up burst: `Burst`
+/// would fire every missed tick back-to-back once the supervisor is blocked
+/// for longer than one `period` (a hung server holding a request up to
+/// `request_timeout`, a long connect attempt), producing a burst of
+/// sequential fetches instead of a single one. Unreachable at the shipped
+/// default (`poll_interval` 300s vs `request_timeout` 10s), but reachable for
+/// an operator who configures a poll interval shorter than the request
+/// timeout.
+fn poll_interval(period: Duration) -> Interval {
+    let mut poll_tick = interval(period);
+    poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    poll_tick
 }
 
 /// Opens `GET /sync/v1/events` and returns the raw byte stream.
@@ -162,4 +215,49 @@ pub(crate) async fn on_notification(
     snapshot_path: Option<&std::path::Path>,
 ) {
     fetch_and_store(client, base_url, sdk_key, shared, snapshot_path).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures_util::FutureExt;
+
+    use super::poll_interval;
+
+    /// Proves `poll_interval` sets `MissedTickBehavior::Delay`, not the
+    /// `tokio::time::interval` default of `Burst`. After the supervisor is
+    /// stalled for more than one period, `Burst` would make several `.tick()`
+    /// calls resolve immediately in a row (a catch-up burst); `Delay` must
+    /// make only the first one resolve immediately, and the following one
+    /// must still be pending.
+    #[tokio::test(start_paused = true)]
+    async fn poll_interval_does_not_burst_after_a_long_stall() {
+        let period = Duration::from_millis(100);
+        let mut tick = poll_interval(period);
+
+        // The first tick fires immediately regardless of missed-tick
+        // behavior; consume it so the assertion below is about the SECOND
+        // tick's readiness.
+        tick.tick().await;
+
+        // Simulate the supervisor being blocked for over three periods (a
+        // hung request, a long connect attempt).
+        tokio::time::advance(period * 3 + Duration::from_millis(10)).await;
+
+        // One tick is due and ready immediately.
+        tick.tick().now_or_never().expect(
+            "at least one tick must be immediately ready after the simulated stall elapsed",
+        );
+
+        // With `Delay`, the tick after that is rescheduled `period` from the
+        // one just consumed, so it must NOT also be immediately ready. With
+        // the default `Burst`, this call would resolve `Ready` too,
+        // producing the catch-up burst this test guards against.
+        assert!(
+            tick.tick().now_or_never().is_none(),
+            "a second tick must not be immediately ready after a stall: \
+             MissedTickBehavior::Delay must be set, not the default Burst"
+        );
+    }
 }

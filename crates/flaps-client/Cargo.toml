@@ -26,7 +26,7 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = { workspace = true }
 flaps-server = { workspace = true }
 flaps-store = { workspace = true }
