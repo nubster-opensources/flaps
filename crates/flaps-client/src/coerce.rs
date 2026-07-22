@@ -6,14 +6,20 @@
 use open_feature::StructValue;
 
 /// `i64::MIN` expressed as `f64` (exactly representable).
-const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0_f64;
+///
+/// Shared with [`crate::metadata_mapper`], which applies the same
+/// integer-compatibility check to ruleset metadata numbers.
+pub(crate) const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0_f64;
 
 /// Largest `f64` value that can be cast to `i64` without truncation.
 ///
 /// `i64::MAX` (2^63 - 1) rounds up to 2^63 when converted to `f64`, which
 /// overflows on cast back. The previous exactly-representable `f64` is
 /// 2^63 - 1024.
-const I64_MAX_SAFE_F64: f64 = 9_223_372_036_854_774_784.0_f64;
+///
+/// Shared with [`crate::metadata_mapper`], which applies the same
+/// integer-compatibility check to ruleset metadata numbers.
+pub(crate) const I64_MAX_SAFE_F64: f64 = 9_223_372_036_854_774_784.0_f64;
 
 /// Coerces a JSON value to `bool`. Returns `None` when the value is not a boolean.
 #[must_use]

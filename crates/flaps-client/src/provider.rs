@@ -12,12 +12,13 @@ use open_feature::provider::ResolutionDetails;
 use open_feature::provider::{FeatureProvider, ProviderMetadata, ProviderStatus};
 use open_feature::{
     EvaluationContext, EvaluationError, EvaluationErrorCode, EvaluationReason, EvaluationResult,
-    StructValue,
+    FlagMetadata, StructValue,
 };
 use tokio::task::JoinHandle;
 
 use crate::coerce;
 use crate::context_mapper;
+use crate::metadata_mapper;
 use crate::reason_mapper;
 use crate::shared::ProviderShared;
 use crate::status::SyncStatus;
@@ -138,11 +139,20 @@ impl FlapsProvider {
     }
 
     /// Evaluates a flag from the current ruleset.
+    ///
+    /// Returns the resolved value, variant, reason and the OpenFeature
+    /// [`FlagMetadata`] converted from the merged flag-set and flag metadata
+    /// (`None` when the merged metadata is empty).
     fn evaluate_raw(
         &self,
         flag_key: &str,
         evaluation_context: &EvaluationContext,
-    ) -> EvaluationResult<(serde_json::Value, Option<String>, EvaluationReason)> {
+    ) -> EvaluationResult<(
+        serde_json::Value,
+        Option<String>,
+        EvaluationReason,
+        Option<FlagMetadata>,
+    )> {
         let guard = self.shared.ruleset.load();
         let flag_set = guard.as_ref().as_ref().ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::ProviderNotReady,
@@ -184,7 +194,8 @@ impl FlapsProvider {
         })?;
 
         let reason = reason_mapper::map_reason(resolution.reason);
-        Ok((value, resolution.variant, reason))
+        let flag_metadata = metadata_mapper::map_metadata(&resolution.metadata);
+        Ok((value, resolution.variant, reason, flag_metadata))
     }
 }
 
@@ -251,7 +262,8 @@ impl FeatureProvider for FlapsProvider {
         flag_key: &str,
         evaluation_context: &EvaluationContext,
     ) -> EvaluationResult<ResolutionDetails<bool>> {
-        let (value, variant, reason) = self.evaluate_raw(flag_key, evaluation_context)?;
+        let (value, variant, reason, flag_metadata) =
+            self.evaluate_raw(flag_key, evaluation_context)?;
         let typed = coerce::to_bool(&value).ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::TypeMismatch,
             message: Some(format!("flag `{flag_key}` value is not a boolean")),
@@ -260,7 +272,7 @@ impl FeatureProvider for FlapsProvider {
             value: typed,
             variant,
             reason: Some(reason),
-            flag_metadata: None,
+            flag_metadata,
         })
     }
 
@@ -269,7 +281,8 @@ impl FeatureProvider for FlapsProvider {
         flag_key: &str,
         evaluation_context: &EvaluationContext,
     ) -> EvaluationResult<ResolutionDetails<i64>> {
-        let (value, variant, reason) = self.evaluate_raw(flag_key, evaluation_context)?;
+        let (value, variant, reason, flag_metadata) =
+            self.evaluate_raw(flag_key, evaluation_context)?;
         let typed = coerce::to_int(&value).ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::TypeMismatch,
             message: Some(format!("flag `{flag_key}` value is not an integer")),
@@ -278,7 +291,7 @@ impl FeatureProvider for FlapsProvider {
             value: typed,
             variant,
             reason: Some(reason),
-            flag_metadata: None,
+            flag_metadata,
         })
     }
 
@@ -287,7 +300,8 @@ impl FeatureProvider for FlapsProvider {
         flag_key: &str,
         evaluation_context: &EvaluationContext,
     ) -> EvaluationResult<ResolutionDetails<f64>> {
-        let (value, variant, reason) = self.evaluate_raw(flag_key, evaluation_context)?;
+        let (value, variant, reason, flag_metadata) =
+            self.evaluate_raw(flag_key, evaluation_context)?;
         let typed = coerce::to_float(&value).ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::TypeMismatch,
             message: Some(format!("flag `{flag_key}` value is not a float")),
@@ -296,7 +310,7 @@ impl FeatureProvider for FlapsProvider {
             value: typed,
             variant,
             reason: Some(reason),
-            flag_metadata: None,
+            flag_metadata,
         })
     }
 
@@ -305,7 +319,8 @@ impl FeatureProvider for FlapsProvider {
         flag_key: &str,
         evaluation_context: &EvaluationContext,
     ) -> EvaluationResult<ResolutionDetails<String>> {
-        let (value, variant, reason) = self.evaluate_raw(flag_key, evaluation_context)?;
+        let (value, variant, reason, flag_metadata) =
+            self.evaluate_raw(flag_key, evaluation_context)?;
         let typed = coerce::to_string(&value).ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::TypeMismatch,
             message: Some(format!("flag `{flag_key}` value is not a string")),
@@ -314,7 +329,7 @@ impl FeatureProvider for FlapsProvider {
             value: typed,
             variant,
             reason: Some(reason),
-            flag_metadata: None,
+            flag_metadata,
         })
     }
 
@@ -323,7 +338,8 @@ impl FeatureProvider for FlapsProvider {
         flag_key: &str,
         evaluation_context: &EvaluationContext,
     ) -> EvaluationResult<ResolutionDetails<StructValue>> {
-        let (value, variant, reason) = self.evaluate_raw(flag_key, evaluation_context)?;
+        let (value, variant, reason, flag_metadata) =
+            self.evaluate_raw(flag_key, evaluation_context)?;
         let typed = coerce::to_struct(&value).ok_or_else(|| EvaluationError {
             code: EvaluationErrorCode::TypeMismatch,
             message: Some(format!("flag `{flag_key}` value is not a struct/object")),
@@ -332,7 +348,7 @@ impl FeatureProvider for FlapsProvider {
             value: typed,
             variant,
             reason: Some(reason),
-            flag_metadata: None,
+            flag_metadata,
         })
     }
 }

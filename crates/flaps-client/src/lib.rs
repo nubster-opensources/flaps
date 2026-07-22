@@ -19,6 +19,7 @@
 mod backoff;
 mod coerce;
 mod context_mapper;
+mod metadata_mapper;
 mod reason_mapper;
 mod shared;
 mod snapshot;
