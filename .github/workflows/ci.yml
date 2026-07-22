@@ -82,7 +82,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: postgres
-      - run: cargo test -p flaps-store --all-features --no-fail-fast
+      - run: cargo test -p flaps-store -p flaps-server --all-features --no-fail-fast
 
   supply-chain:
     name: Supply chain
