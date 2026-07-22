@@ -399,15 +399,37 @@ pub async fn recompile_environment<S: Store>(
 /// ([`AppState::lock_project`](crate::state::AppState::lock_project)) across
 /// the write and this call, so no other in-scope mutation for the same
 /// project can install a conflicting ruleset in between.
+///
+/// # Best-effort, by design
+///
+/// The store write this function follows has already committed and is
+/// durable: it is done, audited, and cannot be un-done by anything that
+/// happens here. Compiling and installing the cache is a separate,
+/// best-effort repair step, so a failure recompiling one environment (a
+/// transient store error, a dropped connection) must never abort the
+/// remaining environments in `affected`. Every environment is attempted;
+/// failures are collected and logged with [`tracing::error!`] (project and
+/// environment key included, so an operator can identify exactly which
+/// environment's cache is stale), never propagated as an `Err` that would
+/// turn an already-committed write into an HTTP 500. The affected
+/// environment's cached ruleset is simply left as it was (stale, or absent)
+/// until the next mutation that recomputes it, or a daemon restart that
+/// rebuilds the whole cache from the store.
 pub async fn recompile_committed<S: Store>(
     state: &AppState<S>,
     project: &ProjectKey,
     affected: &[EnvironmentKey],
-) -> Result<(), ApiError> {
+) {
     for environment in affected {
-        recompile_environment(state, project, environment).await?;
+        if let Err(error) = recompile_environment(state, project, environment).await {
+            tracing::error!(
+                project = %project,
+                environment = %environment,
+                error = ?error,
+                "post-commit recompile failed; this environment's cache is stale until the next mutation or a restart"
+            );
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -654,8 +676,7 @@ mod tests {
         )
         .await;
 
-        let result = recompile_committed(&state, &project, std::slice::from_ref(&env_a)).await;
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        recompile_committed(&state, &project, std::slice::from_ref(&env_a)).await;
 
         let cache = state.cache.read().await;
         let recompiled = cache
@@ -669,6 +690,96 @@ mod tests {
         assert!(
             !cache.contains_key(&(project.clone(), env_b.clone())),
             "recompile_committed must not touch environments outside `affected`"
+        );
+    }
+
+    /// A failure recompiling one environment must not prevent the others
+    /// listed in `affected` from being attempted (Fix 1, best-effort): a
+    /// corrupt environment (references a segment that does not exist) is
+    /// listed alongside a healthy one, and the healthy one must still end up
+    /// in the cache. `recompile_committed` cannot inject a transient store
+    /// failure without a fault-injecting store double, so this test proves
+    /// the same code path (recompiling one environment returning `Err` never
+    /// short-circuits the loop) with a compile failure as the fault.
+    #[tokio::test]
+    async fn recompile_committed_is_best_effort_across_environments() {
+        let store = make_store().await;
+        let project = ProjectKey::new("proj").unwrap();
+        let broken_env = EnvironmentKey::new("broken-env").unwrap();
+        let healthy_env = EnvironmentKey::new("healthy-env").unwrap();
+
+        store
+            .upsert_project(
+                "test",
+                &Project {
+                    key: project.clone(),
+                    name: "Proj".into(),
+                    description: None,
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+        for env_key in [&broken_env, &healthy_env] {
+            store
+                .upsert_environment(
+                    "test",
+                    &project,
+                    &Environment {
+                        key: env_key.clone(),
+                        name: env_key.as_str().to_owned(),
+                        external_ref: None,
+                        managed_by: ManagedBy::Local,
+                        metadata: flaps_domain::Metadata::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let flag = seed_bool_flag(&store, &project, "my-flag").await;
+
+        // broken_env references a segment that does not exist: compiling it fails.
+        let broken_config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![TargetingRule {
+                segments: vec![SegmentKey::new("ghost-segment").unwrap()],
+                serve: ServeTarget::Fixed(VariantKey::new("on").unwrap()),
+            }],
+            default_rule: ServeTarget::Fixed(VariantKey::new("off").unwrap()),
+        };
+        store
+            .upsert_flag_env_config("test", &project, &flag.key, &broken_env, &broken_config)
+            .await
+            .unwrap();
+
+        // healthy_env has a valid, unconditional config: compiling it succeeds.
+        let healthy_config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![],
+            default_rule: ServeTarget::Fixed(VariantKey::new("on").unwrap()),
+        };
+        store
+            .upsert_flag_env_config("test", &project, &flag.key, &healthy_env, &healthy_config)
+            .await
+            .unwrap();
+
+        let state = AppState::new(store);
+
+        // `broken_env` is listed FIRST, so a naive `?`-propagating loop would
+        // never reach `healthy_env` at all.
+        recompile_committed(&state, &project, &[broken_env.clone(), healthy_env.clone()]).await;
+
+        let cache = state.cache.read().await;
+        assert!(
+            !cache.contains_key(&(project.clone(), broken_env)),
+            "the broken environment must not be cached (compile failed)"
+        );
+        assert!(
+            cache.contains_key(&(project.clone(), healthy_env)),
+            "a failure recompiling broken_env must not prevent healthy_env, listed after it, \
+             from being attempted and installed"
         );
     }
 }
