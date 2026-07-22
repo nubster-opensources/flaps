@@ -11,7 +11,7 @@ use flaps_domain::{ManagedBy, Project, ProjectKey};
 use crate::{
     auth::AdminPrincipal,
     error::ApiError,
-    etag::{check_if_match, compute_etag},
+    etag::{check_if_match, check_if_none_match, compute_etag},
     recompile::{Change, evict_project_from_cache, install_in_cache, validate_by_compiling},
     state::{AppState, Store},
 };
@@ -66,7 +66,7 @@ pub async fn put_project<S: Store>(
         ));
     }
 
-    // Check If-Match precondition (optional).
+    // Check If-Match / If-None-Match preconditions (both optional).
     let existing = state
         .store
         .get_project(&project_key)
@@ -74,11 +74,14 @@ pub async fn put_project<S: Store>(
         .map_err(ApiError::from)?;
     let is_create = existing.is_none();
 
-    if let Some(ref current) = existing {
-        let current_etag = compute_etag(current)?;
-        let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-        check_if_match(if_match, &current_etag)?;
-    }
+    let current_etag = existing.as_ref().map(compute_etag).transpose()?;
+    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
+    check_if_match(if_match, current_etag.as_deref())?;
+
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    check_if_none_match(if_none_match, existing.is_some())?;
 
     // Compile-as-validation.
     let rulesets = validate_by_compiling(&state, &project_key, &Change::UpsertProject).await?;
@@ -127,18 +130,21 @@ pub async fn delete_project<S: Store>(
     let actor = principal.username;
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
-    // Ensure it exists.
     let existing = state
         .store
         .get_project(&project_key)
         .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::from)?;
 
-    // Check If-Match.
-    let current_etag = compute_etag(&existing)?;
+    // Check If-Match before the existence check: a specific-ETag or `*`
+    // precondition on a missing resource is a 412, not a 404 (RFC 7232 SS3.1).
+    let current_etag = existing.as_ref().map(compute_etag).transpose()?;
     let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, &current_etag)?;
+    check_if_match(if_match, current_etag.as_deref())?;
+
+    if existing.is_none() {
+        return Err(ApiError::NotFound);
+    }
 
     // validate_by_compiling for DeleteProject returns empty (no compilation needed).
     validate_by_compiling(&state, &project_key, &Change::DeleteProject).await?;

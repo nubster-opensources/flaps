@@ -11,7 +11,7 @@ use flaps_domain::{Flag, FlagKey, ProjectKey};
 use crate::{
     auth::AdminPrincipal,
     error::ApiError,
-    etag::{check_if_match, compute_etag},
+    etag::{check_if_match, check_if_none_match, compute_etag},
     recompile::{Change, install_in_cache, validate_by_compiling},
     state::{AppState, Store},
 };
@@ -91,11 +91,14 @@ pub async fn put_flag<S: Store>(
         .map_err(ApiError::from)?;
     let is_create = existing.is_none();
 
-    if let Some(ref current) = existing {
-        let current_etag = compute_etag(current)?;
-        let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-        check_if_match(if_match, &current_etag)?;
-    }
+    let current_etag = existing.as_ref().map(compute_etag).transpose()?;
+    let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
+    check_if_match(if_match, current_etag.as_deref())?;
+
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    check_if_none_match(if_none_match, existing.is_some())?;
 
     // Compile-as-validation.
     let rulesets = validate_by_compiling(&state, &project_key, &Change::UpsertFlag(&body)).await?;
@@ -137,12 +140,15 @@ pub async fn delete_flag<S: Store>(
         .store
         .get_flag(&project_key, &flag_key)
         .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::from)?;
 
-    let current_etag = compute_etag(&existing)?;
+    let current_etag = existing.as_ref().map(compute_etag).transpose()?;
     let if_match = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok());
-    check_if_match(if_match, &current_etag)?;
+    check_if_match(if_match, current_etag.as_deref())?;
+
+    if existing.is_none() {
+        return Err(ApiError::NotFound);
+    }
 
     // Compile affected envs without this flag to ensure nothing breaks.
     let rulesets =
