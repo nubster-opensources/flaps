@@ -4,8 +4,14 @@
 //! 1. Opening `GET /sync/v1/events` (SSE stream).
 //! 2. Fetching the ruleset immediately on (re)connect.
 //! 3. Fetching again on each SSE notification.
-//! 4. Falling back to a periodic poll every `poll_interval` when SSE is connected.
-//! 5. Reconnecting with full-jitter backoff when the SSE stream drops.
+//! 4. Falling back to a periodic poll every `poll_interval`, running
+//!    unconditionally rather than only while SSE is connected. A client that
+//!    cannot hold an SSE subscription (for instance because the server's
+//!    concurrency quota permanently rejects it) must still degrade to
+//!    polling instead of freezing on the ruleset last observed.
+//! 5. Reconnecting with full-jitter backoff when the SSE stream drops or
+//!    fails to open; the poll cadence runs independently of that backoff, so
+//!    a slow reconnect schedule never delays a due poll.
 //!
 //! The task is stopped by `JoinHandle::abort()` from `Drop for FlapsProvider`.
 
@@ -56,6 +62,16 @@ async fn run_supervisor(
     )
     .await;
 
+    // The poll interval is created once, outside the connect/reconnect loop,
+    // and ticked unconditionally: whether SSE is connected, disconnected, or
+    // permanently rejected by the server has no bearing on it. Hoisting it
+    // out of the `Ok` connect arm is what lets a quota-rejected client (see
+    // issue #111) still observe ruleset changes.
+    let mut poll_tick = interval(config.poll_interval);
+    // The first tick fires immediately; skip it to avoid a double fetch right
+    // after the initial fetch above.
+    poll_tick.tick().await;
+
     loop {
         // Attempt to open the SSE stream.
         match open_event_stream(&client, &config.base_url, &config.sdk_key).await {
@@ -72,10 +88,6 @@ async fn run_supervisor(
                     snapshot_path,
                 )
                 .await;
-
-                let mut poll_tick = interval(config.poll_interval);
-                // The first tick fires immediately; skip it to avoid a double fetch.
-                poll_tick.tick().await;
 
                 let mut decoder = SseDecoder::new();
 
@@ -125,9 +137,31 @@ async fn run_supervisor(
             }
         }
 
-        // Backoff before next reconnect attempt.
+        // Backoff before the next reconnect attempt. The poll fallback keeps
+        // ticking on its own cadence while this wait elapses (`select!`
+        // below), so a client stuck in this arm - for instance because the
+        // server durably rejects its SSE subscription - still refreshes the
+        // ruleset on schedule instead of freezing until reconnection
+        // succeeds. The wait duration itself is untouched: the CONNECT
+        // backoff and the poll cadence are driven independently.
         let delay = backoff.next_delay();
-        tokio::time::sleep(delay).await;
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = &mut sleep => break,
+                _ = poll_tick.tick() => {
+                    fetch_and_store(
+                        &client,
+                        &config.base_url,
+                        &config.sdk_key,
+                        &shared,
+                        snapshot_path,
+                    )
+                    .await;
+                }
+            }
+        }
     }
 }
 
