@@ -12,7 +12,7 @@ use crate::{
     auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, check_if_none_match, compute_etag},
-    recompile::{Change, install_in_cache, validate_by_compiling},
+    recompile::{Change, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
 
@@ -54,6 +54,9 @@ pub async fn put_flag_env_config<S: Store>(
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
+
+    // Hold the per-project lock for the whole cycle (issues #105, #108).
+    let _lock = state.lock_project(&project_key).await;
 
     // All three parents must exist. Checking explicitly up front (rather than
     // relying on the foreign-key violation the write would eventually raise)
@@ -100,6 +103,7 @@ pub async fn put_flag_env_config<S: Store>(
         config: &body,
     };
     let rulesets = validate_by_compiling(&state, &project_key, &change).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -107,7 +111,7 @@ pub async fn put_flag_env_config<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    recompile_committed(&state, &project_key, &affected).await?;
 
     let etag = compute_etag(&body)?;
     let status = if is_create {
@@ -135,6 +139,8 @@ pub async fn delete_flag_env_config<S: Store>(
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let env_key = EnvironmentKey::new(env).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
+    let _lock = state.lock_project(&project_key).await;
+
     let existing = state
         .store
         .get_flag_env_config(&project_key, &flag_key, &env_key)
@@ -154,6 +160,7 @@ pub async fn delete_flag_env_config<S: Store>(
         environment: &env_key,
     };
     let rulesets = validate_by_compiling(&state, &project_key, &change).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -161,7 +168,7 @@ pub async fn delete_flag_env_config<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    recompile_committed(&state, &project_key, &affected).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

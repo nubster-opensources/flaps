@@ -12,7 +12,7 @@ use crate::{
     auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, check_if_none_match, compute_etag},
-    recompile::{Change, evict_project_from_cache, install_in_cache, validate_by_compiling},
+    recompile::{Change, evict_project_from_cache, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
 
@@ -66,7 +66,13 @@ pub async fn put_project<S: Store>(
         ));
     }
 
-    // Check If-Match / If-None-Match preconditions (both optional).
+    // Hold the per-project lock for the whole cycle: precondition check,
+    // write and post-commit recompile all happen atomically with respect to
+    // any other in-scope mutation for this project (issues #105, #108).
+    let _lock = state.lock_project(&project_key).await;
+
+    // Check If-Match / If-None-Match preconditions (both optional), atomic
+    // with the write below since the lock is held across both.
     let existing = state
         .store
         .get_project(&project_key)
@@ -83,18 +89,20 @@ pub async fn put_project<S: Store>(
         .and_then(|v| v.to_str().ok());
     check_if_none_match(if_none_match, existing.is_some())?;
 
-    // Compile-as-validation.
+    // Compile-as-validation: a clean 422 on invalid input, before any write.
     let rulesets = validate_by_compiling(&state, &project_key, &Change::UpsertProject).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
-    // Write.
+    // Write (its own transaction and audit entry).
     state
         .store
         .upsert_project(&actor, &body)
         .await
         .map_err(ApiError::from)?;
 
-    // Update cache.
-    install_in_cache(&state, &project_key, rulesets).await;
+    // Recompile the affected environments from the just-committed store
+    // state and install them, replacing any pre-write snapshot (#105).
+    recompile_committed(&state, &project_key, &affected).await?;
 
     // Build response.
     let etag = compute_etag(&body)?;
@@ -129,6 +137,8 @@ pub async fn delete_project<S: Store>(
 ) -> Result<impl IntoResponse, ApiError> {
     let actor = principal.username;
     let project_key = ProjectKey::new(key).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
+
+    let _lock = state.lock_project(&project_key).await;
 
     let existing = state
         .store

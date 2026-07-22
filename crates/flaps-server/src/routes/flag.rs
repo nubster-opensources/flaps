@@ -12,7 +12,7 @@ use crate::{
     auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, check_if_none_match, compute_etag},
-    recompile::{Change, install_in_cache, validate_by_compiling},
+    recompile::{Change, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
 
@@ -74,6 +74,9 @@ pub async fn put_flag<S: Store>(
         ));
     }
 
+    // Hold the per-project lock for the whole cycle (issues #105, #108).
+    let _lock = state.lock_project(&project_key).await;
+
     // The parent project must exist. Checking explicitly up front (rather than
     // relying on the foreign-key violation the write would eventually raise)
     // gives a clean 404 without compiling an empty ruleset for a new flag.
@@ -102,6 +105,7 @@ pub async fn put_flag<S: Store>(
 
     // Compile-as-validation.
     let rulesets = validate_by_compiling(&state, &project_key, &Change::UpsertFlag(&body)).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -109,7 +113,7 @@ pub async fn put_flag<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    recompile_committed(&state, &project_key, &affected).await?;
 
     let etag = compute_etag(&body)?;
     let status = if is_create {
@@ -136,6 +140,8 @@ pub async fn delete_flag<S: Store>(
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let flag_key = FlagKey::new(flag).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
+    let _lock = state.lock_project(&project_key).await;
+
     let existing = state
         .store
         .get_flag(&project_key, &flag_key)
@@ -150,9 +156,13 @@ pub async fn delete_flag<S: Store>(
         return Err(ApiError::NotFound);
     }
 
-    // Compile affected envs without this flag to ensure nothing breaks.
+    // Compile affected envs without this flag to ensure nothing breaks. The
+    // affected set MUST be computed before the write: deleting a flag
+    // cascades and deletes its flag_env_config rows, so a post-write lookup
+    // would find no evidence of which environments used to reference it.
     let rulesets =
         validate_by_compiling(&state, &project_key, &Change::DeleteFlag(&flag_key)).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -160,7 +170,9 @@ pub async fn delete_flag<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    // Recompile from committed store state: with the flag gone, its
+    // flag_env_config rows are already cascade-deleted (see above).
+    recompile_committed(&state, &project_key, &affected).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

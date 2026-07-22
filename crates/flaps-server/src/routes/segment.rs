@@ -12,7 +12,7 @@ use crate::{
     auth::AdminPrincipal,
     error::ApiError,
     etag::{check_if_match, check_if_none_match, compute_etag},
-    recompile::{Change, install_in_cache, validate_by_compiling},
+    recompile::{Change, recompile_committed, validate_by_compiling},
     state::{AppState, Store},
 };
 
@@ -74,6 +74,9 @@ pub async fn put_segment<S: Store>(
         ));
     }
 
+    // Hold the per-project lock for the whole cycle (issues #105, #108).
+    let _lock = state.lock_project(&project_key).await;
+
     // The parent project must exist. Checking explicitly up front (rather than
     // relying on the foreign-key violation the write would eventually raise)
     // gives a clean 404 without compiling an empty ruleset for a new segment.
@@ -103,6 +106,7 @@ pub async fn put_segment<S: Store>(
     // Compile-as-validation: recompile all envs referencing this segment with the new definition.
     let rulesets =
         validate_by_compiling(&state, &project_key, &Change::UpsertSegment(&body)).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -110,7 +114,7 @@ pub async fn put_segment<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    recompile_committed(&state, &project_key, &affected).await?;
 
     let etag = compute_etag(&body)?;
     let status = if is_create {
@@ -140,6 +144,8 @@ pub async fn delete_segment<S: Store>(
     let project_key = ProjectKey::new(project).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
     let segment_key = SegmentKey::new(segment).map_err(|e| ApiError::InvalidBody(e.to_string()))?;
 
+    let _lock = state.lock_project(&project_key).await;
+
     let existing = state
         .store
         .get_segment(&project_key, &segment_key)
@@ -157,6 +163,7 @@ pub async fn delete_segment<S: Store>(
     // If any env still references this segment, compilation will fail -> 400, deletion refused.
     let rulesets =
         validate_by_compiling(&state, &project_key, &Change::DeleteSegment(&segment_key)).await?;
+    let affected: Vec<_> = rulesets.into_iter().map(|r| r.environment).collect();
 
     state
         .store
@@ -164,7 +171,7 @@ pub async fn delete_segment<S: Store>(
         .await
         .map_err(ApiError::from)?;
 
-    install_in_cache(&state, &project_key, rulesets).await;
+    recompile_committed(&state, &project_key, &affected).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
