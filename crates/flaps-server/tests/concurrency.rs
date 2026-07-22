@@ -203,6 +203,17 @@ fn delete_req(uri: &str, token: &str, if_match: Option<&str>) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
+/// Ensures `project`/`env` exist in the store.
+///
+/// Tolerates a WARM database: a local developer re-running the
+/// PostgreSQL-backed tests against a persistent PostgreSQL instance (rather
+/// than the fresh, empty one CI provisions per job) will find the project and
+/// environment already present from a previous run. `PUT` is idempotent
+/// (issue #108's create-or-update contract), so a `201 Created` OR a `200 OK`
+/// are both an accepted outcome here. This function is pure scaffolding, not
+/// the property any test is actually exercising, so this tolerance is safe;
+/// any OTHER status still fails loudly, since that would be a real
+/// regression, not a warm-database artifact.
 async fn setup_project_env(app: &axum::Router, token: &str, project: &str, env: &str) {
     let resp = app
         .clone()
@@ -215,7 +226,12 @@ async fn setup_project_env(app: &axum::Router, token: &str, project: &str, env: 
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(
+        matches!(resp.status(), StatusCode::CREATED | StatusCode::OK),
+        "creating/updating project {project} must succeed (201 on first run, 200 on a warm \
+         database), got {}",
+        resp.status()
+    );
 
     let resp = app
         .clone()
@@ -228,7 +244,12 @@ async fn setup_project_env(app: &axum::Router, token: &str, project: &str, env: 
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(
+        matches!(resp.status(), StatusCode::CREATED | StatusCode::OK),
+        "creating/updating environment {project}/{env} must succeed (201 on first run, 200 on a \
+         warm database), got {}",
+        resp.status()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,20 +258,25 @@ async fn setup_project_env(app: &axum::Router, token: &str, project: &str, env: 
 // ---------------------------------------------------------------------------
 
 /// Store-agnostic body: proves #108 for any `S: Store` backend.
-async fn assert_concurrent_put_flag_same_etag_yields_exactly_one_success<S: Store>(store: S) {
+///
+/// `project`/`env` are caller-supplied (not hardcoded) so that two tests in
+/// this file sharing a single PostgreSQL database (there is no schema
+/// isolation, truncation, or per-test namespacing at the connection level)
+/// never collide on the same row: see the `_postgres` wrapper below for the
+/// namespacing this requires.
+async fn assert_concurrent_put_flag_same_etag_yields_exactly_one_success<S: Store>(
+    store: S,
+    project: &str,
+    env: &str,
+) {
     let (app, _state, token) = make_authed_app(store).await;
-    setup_project_env(&app, &token, "proj", "prod").await;
+    setup_project_env(&app, &token, project, env).await;
 
     let flag = bool_flag("beta-flag");
+    let flag_uri = format!("/projects/{project}/flags/beta-flag");
     let resp = app
         .clone()
-        .oneshot(put_req(
-            "/projects/proj/flags/beta-flag",
-            &flag,
-            &token,
-            None,
-            None,
-        ))
+        .oneshot(put_req(&flag_uri, &flag, &token, None, None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -267,18 +293,13 @@ async fn assert_concurrent_put_flag_same_etag_yields_exactly_one_success<S: Stor
         let etag = etag.clone();
         let updated = updated.clone();
         let barrier = barrier.clone();
+        let flag_uri = flag_uri.clone();
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            app.oneshot(put_req(
-                "/projects/proj/flags/beta-flag",
-                &updated,
-                &token,
-                Some(&etag),
-                None,
-            ))
-            .await
-            .unwrap()
-            .status()
+            app.oneshot(put_req(&flag_uri, &updated, &token, Some(&etag), None))
+                .await
+                .unwrap()
+                .status()
         }));
     }
 
@@ -298,18 +319,34 @@ async fn assert_concurrent_put_flag_same_etag_yields_exactly_one_success<S: Stor
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_put_flag_same_etag_yields_exactly_one_success_sqlite() {
-    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(make_sqlite_store().await)
-        .await;
+    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(
+        make_sqlite_store().await,
+        "proj",
+        "prod",
+    )
+    .await;
 }
 
 /// CI-only mirror of the SQLite race test above, proving Postgres behaves
 /// identically. Skips silently when `FLAPS_TEST_POSTGRES_URL` is unset.
+///
+/// Uses a project/environment key unique to THIS test (not shared with any
+/// other `_postgres` test in this file): all `_postgres` tests run in the
+/// same binary against the same live database named by
+/// `FLAPS_TEST_POSTGRES_URL`, with no schema isolation, and libtest runs them
+/// in parallel by default, so two tests reusing one project key would race
+/// on the same row regardless of what each test itself is trying to prove.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_put_flag_same_etag_yields_exactly_one_success_postgres() {
     let Some(store) = maybe_make_postgres_store().await else {
         return;
     };
-    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(store).await;
+    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(
+        store,
+        "pg-put-flag-same-etag",
+        "pg-put-flag-same-etag-env",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,17 +355,24 @@ async fn concurrent_put_flag_same_etag_yields_exactly_one_success_postgres() {
 // ---------------------------------------------------------------------------
 
 /// Store-agnostic body: proves #105 for any `S: Store` backend.
+///
+/// `project`/`env` are caller-supplied for the same reason as in
+/// [`assert_concurrent_put_flag_same_etag_yields_exactly_one_success`]: two
+/// `_postgres` tests in this file share one live database with no schema
+/// isolation, so reusing a project/environment key across them would race.
 async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache<S: Store>(
     store: S,
+    project: &str,
+    env: &str,
 ) {
     let (app, state, token) = make_authed_app(store).await;
-    setup_project_env(&app, &token, "proj", "prod").await;
+    setup_project_env(&app, &token, project, env).await;
 
     for key in ["flag-a", "flag-b"] {
         let resp = app
             .clone()
             .oneshot(put_req(
-                &format!("/projects/proj/flags/{key}"),
+                &format!("/projects/{project}/flags/{key}"),
                 &bool_flag(key),
                 &token,
                 None,
@@ -341,7 +385,7 @@ async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_ca
         let resp = app
             .clone()
             .oneshot(put_req(
-                &format!("/projects/proj/flags/{key}/environments/prod/config"),
+                &format!("/projects/{project}/flags/{key}/environments/{env}/config"),
                 &config_with_default("off"),
                 &token,
                 None,
@@ -355,7 +399,7 @@ async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_ca
     let version_before = {
         let cache = state.cache.read().await;
         cache
-            .get(&(project_key("proj"), env_key("prod")))
+            .get(&(project_key(project), env_key(env)))
             .expect("cache must be populated by the setup PUTs")
             .version
     };
@@ -366,10 +410,11 @@ async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_ca
         let app = app.clone();
         let token = token.clone();
         let barrier = barrier.clone();
+        let uri = format!("/projects/{project}/flags/{key}/environments/{env}/config");
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
             app.oneshot(put_req(
-                &format!("/projects/proj/flags/{key}/environments/prod/config"),
+                &uri,
                 &config_with_default("on"),
                 &token,
                 None,
@@ -391,7 +436,7 @@ async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_ca
     let ruleset = {
         let cache = state.cache.read().await;
         cache
-            .get(&(project_key("proj"), env_key("prod")))
+            .get(&(project_key(project), env_key(env)))
             .expect("cache entry must still exist after the concurrent updates")
             .clone()
     };
@@ -420,18 +465,29 @@ async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_ca
 async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache_sqlite() {
     assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache(
         make_sqlite_store().await,
+        "proj",
+        "prod",
     )
     .await;
 }
 
 /// CI-only mirror of the SQLite race test above, proving Postgres behaves
 /// identically. Skips silently when `FLAPS_TEST_POSTGRES_URL` is unset.
+///
+/// Uses a project/environment key unique to THIS test, distinct from every
+/// other `_postgres` test in this file, for the same reason documented on
+/// `concurrent_put_flag_same_etag_yields_exactly_one_success_postgres`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache_postgres() {
     let Some(store) = maybe_make_postgres_store().await else {
         return;
     };
-    assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache(store).await;
+    assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache(
+        store,
+        "pg-flag-env-config-race",
+        "pg-flag-env-config-race-env",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +660,68 @@ async fn if_match_list_matches_any_member() {
     assert_eq!(
         body["description"].as_str(),
         Some("updated via list If-Match")
+    );
+}
+
+/// `if_match_list_matches_any_member` above sends the whole list on a SINGLE
+/// header line, so it passes identically whether or not repeated field-lines
+/// are joined at all: `check_if_match` already splits on `,` before this
+/// branch runs. It proves nothing about the join itself. This test sends the
+/// correct ETag on the SECOND of two separate `If-Match` field-lines: before
+/// the join fix, only the first line (`"not-the-etag"`) would have been read,
+/// the correct ETag would never be seen, and the write would incorrectly get
+/// `412`.
+#[tokio::test]
+async fn if_match_two_field_lines_correct_etag_on_second_line_succeeds() {
+    let (app, _state, token) = make_authed_app(make_sqlite_store().await).await;
+    setup_project_env(&app, &token, "proj", "prod").await;
+
+    let flag = bool_flag("two-line-if-match-flag");
+    let resp = app
+        .clone()
+        .oneshot(put_req(
+            "/projects/proj/flags/two-line-if-match-flag",
+            &flag,
+            &token,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let etag = extract_etag(&resp).unwrap();
+
+    let mut updated = flag.clone();
+    updated.description = Some("updated via two-line If-Match".to_owned());
+
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/projects/proj/flags/two-line-if-match-flag")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .header(
+            header::IF_MATCH,
+            HeaderValue::from_static("\"not-the-etag\""),
+        )
+        .header(
+            header::IF_MATCH,
+            HeaderValue::from_str(&etag).expect("valid header value"),
+        )
+        .body(Body::from(serde_json::to_vec(&updated).unwrap()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the correct ETag on the SECOND If-Match field-line must still be seen: pre-fix, only \
+         the first line would have been read, giving a false 412"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["description"].as_str(),
+        Some("updated via two-line If-Match")
     );
 }
 
@@ -794,6 +912,67 @@ async fn mutation_lock_registry_does_not_grow_for_repeated_nonexistent_projects(
         state.mutation_lock_registry_len(),
         0,
         "the registry must not retain one entry per distinct never-created project key"
+    );
+
+    // Fix B: the same must hold on the precondition-failure paths of
+    // `put_project`/`delete_project` THEMSELVES, not only on the
+    // parent-not-found path of a child resource exercised above. `If-Match`
+    // on a project key that has never existed fails the precondition check
+    // (412, RFC 7232 SS3.1) before the parent-existence branch even applies
+    // here (the project key itself is the addressed resource, there is no
+    // separate parent). Pre-fix, `put_project` released the registry entry
+    // on NO path at all, and `delete_project` only released on the
+    // `NotFound` path -- which this precondition-failure path never reaches,
+    // since the `If-Match` check deliberately runs first.
+    for n in 0..25 {
+        let key = format!("never-existed-put-{n}");
+        let resp = app
+            .clone()
+            .oneshot(put_req(
+                &format!("/projects/{key}"),
+                &bool_project(&key),
+                &token,
+                Some("\"x\""),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "a specific If-Match cannot match a project that has never existed"
+        );
+    }
+
+    assert_eq!(
+        state.mutation_lock_registry_len(),
+        0,
+        "put_project must release the registry entry on every precondition-failure exit, not \
+         just when the parent turns out not to exist"
+    );
+
+    for n in 0..25 {
+        let resp = app
+            .clone()
+            .oneshot(delete_req(
+                &format!("/projects/never-existed-delete-{n}"),
+                &token,
+                Some("\"x\""),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "If-Match on a missing project is 412, not 404 (RFC 7232 SS3.1)"
+        );
+    }
+
+    assert_eq!(
+        state.mutation_lock_registry_len(),
+        0,
+        "delete_project must release the registry entry on the precondition-failure path too, \
+         which runs BEFORE the existence check by design (412 beats 404)"
     );
 }
 
