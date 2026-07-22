@@ -17,8 +17,16 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 #[derive(Debug, Clone, Copy)]
 pub struct SseQuotaConfig {
     /// Maximum number of concurrent SSE subscriptions across every SDK key.
+    ///
+    /// Zero means "reject every subscription", NOT "unlimited". This is the
+    /// opposite convention from the sibling [`crate::rate_limit::RateLimiter`]
+    /// primitive, which expresses "no limit" as an `enabled` flag
+    /// (`RateLimiter::disabled()`) rather than as a numeric edge case.
     pub max_global: usize,
     /// Maximum number of concurrent SSE subscriptions for a single SDK key.
+    ///
+    /// Zero means "reject every subscription", NOT "unlimited"; see
+    /// [`Self::max_global`] for the same caveat.
     pub max_per_key: usize,
 }
 
@@ -73,6 +81,25 @@ impl Drop for SseSubscriptionGuard {
 /// the unbounded-resource problem this quota exists to prevent.
 pub struct SseQuota {
     global: Arc<Semaphore>,
+    // No eviction: entries are only ever created AFTER authentication
+    // succeeds (see `try_acquire`), so cardinality is bounded by the number
+    // of distinct SDK keys that actually authenticated over the process
+    // lifetime, not by attacker-controlled input. This is unlike
+    // `rate_limit.rs`'s `MAX_BUCKETS` sweep, which guards an unauthenticated
+    // enumeration path (issue #75) and therefore does need a cap. Growth here
+    // is monotonic but judged negligible: a real deployment authenticates a
+    // small, roughly fixed set of SDK keys.
+    //
+    // IMPORTANT for whoever revisits this: a naive "remove entries with an
+    // idle semaphore" sweep would be UNSOUND. A concurrent `try_acquire` can
+    // already hold an `Arc` clone of a key's semaphore in the window between
+    // the map lookup and `try_acquire_owned` completing; if a sweep removed
+    // the map entry during that window, the NEXT `try_acquire` for the same
+    // key would `or_insert_with` a fresh semaphore at full capacity,
+    // admitting up to `2 * max_per_key` concurrent subscriptions for that
+    // key. Any future eviction must hold the map lock while checking
+    // `Arc::strong_count(sem) == 1` (no in-flight acquire holds a clone)
+    // before removing an entry.
     per_key: Mutex<HashMap<String, Arc<Semaphore>>>,
     max_per_key: usize,
     active_subscriptions: Arc<AtomicU64>,
@@ -105,8 +132,10 @@ impl SseQuota {
         };
 
         let key_semaphore = {
-            #[allow(clippy::expect_used)]
-            let mut per_key = self.per_key.lock().expect("sse quota mutex poisoned");
+            let mut per_key = self
+                .per_key
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(
                 per_key
                     .entry(key.to_owned())
