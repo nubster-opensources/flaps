@@ -31,13 +31,18 @@ jobs:
     name: Fuzz flagd ruleset parser
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # rust-toolchain.toml pins 1.88.0 and outranks the toolchain the setup
+      # action installs as the default, so libFuzzer would never see nightly.
+      # RUSTUP_TOOLCHAIN outranks the file and is the only reliable override.
+      RUSTUP_TOOLCHAIN: nightly-2026-07-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0 action
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-15
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: fuzz
