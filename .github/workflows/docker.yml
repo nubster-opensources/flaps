@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   IMAGE_NAME: nubster/flaps
 
@@ -14,11 +17,13 @@ jobs:
     name: Build and Push
     runs-on: ubuntu-latest
     env:
-      HAS_REGISTRY_CREDENTIALS: ${{ secrets.DOCKERHUB_PAT != '' }}
+      HAS_REGISTRY_CREDENTIALS: ${{ github.event_name == 'push' && secrets.DOCKERHUB_PAT != '' }}
       REGISTRY_USERNAME: pierrickfonquerne
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
