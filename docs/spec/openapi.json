@@ -66,7 +66,7 @@
         "in": "header",
         "required": false,
         "schema": { "type": "string" },
-        "description": "Optional strong ETag precondition for optimistic concurrency control. When present and different from the current ETag, the request fails with 412 Precondition Failed and no write occurs."
+        "description": "Optional strong ETag precondition for optimistic concurrency control (RFC 7232 SS3.1), checked atomically with the write. Accepts a single ETag, a comma-separated list (matches if any member equals the current ETag), or '*' (matches if the resource currently exists). Quoted and unquoted forms are both accepted. Weak ETags (W/\"...\") are never emitted or specially handled: every ETag in this API is strong. On no match -- including '*' against a resource that does not currently exist -- the request fails with 412 Precondition Failed and no write occurs."
       },
       "IfNoneMatchHeader": {
         "name": "If-None-Match",
@@ -74,6 +74,13 @@
         "required": false,
         "schema": { "type": "string" },
         "description": "Optional ETag for conditional GET. An exact match short-circuits to 304 Not Modified with no body."
+      },
+      "IfNoneMatchCreateGuardHeader": {
+        "name": "If-None-Match",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string" },
+        "description": "Optional create-only guard (RFC 7232 SS3.2), checked atomically with the write. Only the '*' value is supported: it fails the request with 412 Precondition Failed (and no write occurs) if the resource already exists. Any other value is ignored. Independent of If-Match: a request may carry either, both, or neither."
       }
     },
     "headers": {
@@ -126,7 +133,7 @@
         }
       },
       "PreconditionFailed": {
-        "description": "The supplied If-Match header does not match the current ETag; the write was refused.",
+        "description": "A supplied precondition was not met and the write was refused: either the If-Match header (a specific ETag, a comma-separated list, or '*') did not match the current ETag, or the If-None-Match: * create-only guard found the resource already exists.",
         "content": {
           "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
         }
@@ -556,7 +563,8 @@
         "security": [{ "adminSession": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/ProjectParam" },
-          { "$ref": "#/components/parameters/IfMatchHeader" }
+          { "$ref": "#/components/parameters/IfMatchHeader" },
+          { "$ref": "#/components/parameters/IfNoneMatchCreateGuardHeader" }
         ],
         "requestBody": {
           "required": true,
@@ -650,7 +658,8 @@
         "parameters": [
           { "$ref": "#/components/parameters/ProjectParam" },
           { "$ref": "#/components/parameters/EnvParam" },
-          { "$ref": "#/components/parameters/IfMatchHeader" }
+          { "$ref": "#/components/parameters/IfMatchHeader" },
+          { "$ref": "#/components/parameters/IfNoneMatchCreateGuardHeader" }
         ],
         "requestBody": {
           "required": true,
@@ -745,7 +754,8 @@
         "parameters": [
           { "$ref": "#/components/parameters/ProjectParam" },
           { "$ref": "#/components/parameters/FlagParam" },
-          { "$ref": "#/components/parameters/IfMatchHeader" }
+          { "$ref": "#/components/parameters/IfMatchHeader" },
+          { "$ref": "#/components/parameters/IfNoneMatchCreateGuardHeader" }
         ],
         "requestBody": {
           "required": true,
@@ -834,7 +844,8 @@
         "parameters": [
           { "$ref": "#/components/parameters/ProjectParam" },
           { "$ref": "#/components/parameters/SegmentParam" },
-          { "$ref": "#/components/parameters/IfMatchHeader" }
+          { "$ref": "#/components/parameters/IfMatchHeader" },
+          { "$ref": "#/components/parameters/IfNoneMatchCreateGuardHeader" }
         ],
         "requestBody": {
           "required": true,
@@ -908,7 +919,8 @@
           { "$ref": "#/components/parameters/ProjectParam" },
           { "$ref": "#/components/parameters/FlagParam" },
           { "$ref": "#/components/parameters/EnvParam" },
-          { "$ref": "#/components/parameters/IfMatchHeader" }
+          { "$ref": "#/components/parameters/IfMatchHeader" },
+          { "$ref": "#/components/parameters/IfNoneMatchCreateGuardHeader" }
         ],
         "requestBody": {
           "required": true,

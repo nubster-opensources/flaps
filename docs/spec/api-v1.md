@@ -147,26 +147,60 @@ because some resources (`Flag.variants`, for instance) are backed by a
 `HashMap` internally; without sorting, two serializations of the same logical
 value could hash differently.
 
-Two independent mechanisms use this ETag, and they are not applied
-everywhere:
+Three independent mechanisms use this ETag, and they are not applied
+everywhere: optimistic-concurrency writes (4.1), a create-only guard (4.2),
+and conditional reads on the data plane (4.3).
 
 ### 4.1 Optimistic concurrency: `If-Match` on writes
 
 `PUT` and `DELETE` on Project, Environment, Flag, Segment and FlagEnvConfig all
-accept an optional `If-Match` request header. When present, the server
-compares it against the current resource's ETag before writing:
+accept an optional `If-Match` request header, evaluated per
+[RFC 7232 §3.1](https://www.rfc-editor.org/rfc/rfc7232#section-3.1). When
+present, the server compares it against the current resource's ETag
+**atomically with the write** (see 4.4) before writing:
 
 - Missing `If-Match`: no precondition, the write proceeds unconditionally.
-- Matching `If-Match`: the write proceeds.
-- Mismatched `If-Match`: `412 Precondition Failed`, nothing is written.
+- A single ETag that matches the current one: the write proceeds.
+- A comma-separated list of ETags (e.g. `If-Match: "a", "b", "c"`): the write
+  proceeds if *any* listed value matches the current ETag.
+- `If-Match: *`: the write proceeds only if the resource currently exists.
+- No match (including `*` against a resource that does not exist): `412
+  Precondition Failed`, nothing is written. This applies even when the
+  resource does not exist at all: an `If-Match` header (specific value or
+  `*`) against a missing resource is a `412`, not a `404`.
 
-This is the only conditional mechanism admin CRUD routes support. Note in
-particular: the single-resource `GET` routes (`GET /projects/{project}` and
-its siblings) always return `200` with an `ETag` response header; they do
-**not** support `If-None-Match` / `304`. Conditional reads are only
-implemented where the payload is large and polled frequently (see 4.2).
+All comparisons use the **strong** comparison function: every ETag this API
+emits or accepts is strong (see the intro to section 4), so a weak-tagged
+value (`W/"..."`) is never treated specially and simply never matches. Quoted
+(`"abc123"`) and unquoted (`abc123`) forms are both accepted; surrounding
+quotes are stripped before comparison.
 
-### 4.2 Conditional reads: `If-None-Match` on the data plane
+This is the only conditional mechanism the admin CRUD routes support for
+existing resources. Note in particular: the single-resource `GET` routes
+(`GET /projects/{project}` and its siblings) always return `200` with an
+`ETag` response header; they do **not** support `If-None-Match` / `304`.
+Conditional reads are only implemented where the payload is large and polled
+frequently (see 4.3).
+
+### 4.2 Create-only guard: `If-None-Match: *` on writes
+
+`PUT` on Project, Environment, Flag, Segment and FlagEnvConfig additionally
+accepts an optional `If-None-Match` request header, evaluated per
+[RFC 7232 §3.2](https://www.rfc-editor.org/rfc/rfc7232#section-3.2). Only the
+`*` value is supported here (the general listed-ETags form of
+`If-None-Match` exists to make `GET` conditional, which this write-side guard
+has no use for):
+
+- `If-None-Match: *`: the write proceeds only if the resource does **not**
+  currently exist (a "create, never overwrite" guard). If it already exists,
+  the request fails with `412 Precondition Failed` and nothing is written.
+- Any other value, or the header absent: no precondition from this guard.
+
+This is independent of `If-Match` (4.1): a request may carry either, both, or
+neither. Carrying both is unusual but well-defined, since both are evaluated
+against the same current-ETag lookup taken atomically with the write.
+
+### 4.3 Conditional reads: `If-None-Match` on the data plane
 
 `POST /ofrep/v1/evaluate/flags` (bulk evaluation) and `GET /sync/v1/ruleset`
 both accept an optional `If-None-Match` request header, compared against the
@@ -174,6 +208,35 @@ current ruleset's content hash. An exact match short-circuits to
 `304 Not Modified` with no body, which matters because SDK clients typically
 poll these endpoints frequently and the compiled document can be large; a 304
 avoids re-serializing and re-transferring it.
+
+### 4.4 Atomicity and serialization of writes
+
+Every admin `PUT`/`DELETE` above serializes against every other admin
+`PUT`/`DELETE` targeting the same project (an in-process, per-project lock
+held for the whole mutation: read the current resource, evaluate 4.1/4.2,
+write, recompile affected environments, install into the ruleset cache).
+Two consequences follow directly from this:
+
+- **Atomic preconditions (4.1, 4.2)**: the ETag comparison and the write
+  happen without any other in-scope mutation for the same project able to
+  run in between, so two concurrent writes racing on the same `If-Match`
+  value can never both succeed (a lost update): exactly one observes the
+  ETag it expects and proceeds, the other observes the now-changed ETag and
+  gets `412`.
+- **A cache that is never stale relative to an acknowledged write**: the
+  ruleset served by `GET /sync/v1/ruleset` and the OFREP evaluation routes is
+  always recompiled from the store state committed by the last acknowledged
+  write, never from a snapshot a differently-timed concurrent write could
+  make stale. Two concurrent writes to different resources within the same
+  environment (for example, two different flags' configs) both end up
+  reflected in the ruleset once both requests complete.
+
+This is an in-process guarantee: it holds across concurrent requests handled
+by one `flapsd` instance, which is the only supported topology today (each
+instance owns its own cache and event stream). It does not coordinate writes
+issued by two separate `flapsd` processes sharing one database; that is a
+tracked follow-up (database-level compare-and-swap) for a future
+multi-instance deployment.
 
 ## 5. Custom response headers
 
