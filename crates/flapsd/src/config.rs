@@ -54,6 +54,28 @@ pub struct Config {
     /// [`ConfigError::InvalidSessionTtl`]: a session that expires immediately
     /// is never useful.
     pub session_ttl_secs: Option<u64>,
+
+    /// Per-key ceiling for concurrent `GET /sync/v1/events` SSE subscriptions
+    /// (default:
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    /// when omitted).
+    ///
+    /// Use [`Config::effective_max_sse_subscriptions_per_key`] to read the
+    /// value with the default applied. A zero value is rejected by
+    /// [`Config::load`] as [`ConfigError::InvalidMaxSseSubscriptionsPerKey`]:
+    /// a quota that admits zero connections has no "unbounded" meaning, it
+    /// simply locks every key out of the sync stream.
+    pub max_sse_subscriptions_per_key: Option<usize>,
+
+    /// Global ceiling for concurrent `GET /sync/v1/events` SSE subscriptions,
+    /// across every SDK key (default:
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
+    /// when omitted).
+    ///
+    /// Use [`Config::effective_max_sse_subscriptions_global`] to read the
+    /// value with the default applied. A zero value is rejected by
+    /// [`Config::load`] as [`ConfigError::InvalidMaxSseSubscriptionsGlobal`].
+    pub max_sse_subscriptions_global: Option<usize>,
 }
 
 /// Errors that can occur when loading or validating the configuration.
@@ -99,6 +121,22 @@ pub enum ConfigError {
         flaps_server::state::DEFAULT_SESSION_TTL_SECS
     )]
     InvalidSessionTtl,
+
+    /// `max_sse_subscriptions_per_key` is set to zero.
+    #[error(
+        "invalid max_sse_subscriptions_per_key: must be greater than zero (omit the field to \
+         use the default of {} subscriptions)",
+        flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY
+    )]
+    InvalidMaxSseSubscriptionsPerKey,
+
+    /// `max_sse_subscriptions_global` is set to zero.
+    #[error(
+        "invalid max_sse_subscriptions_global: must be greater than zero (omit the field to \
+         use the default of {} subscriptions)",
+        flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL
+    )]
+    InvalidMaxSseSubscriptionsGlobal,
 }
 
 impl Config {
@@ -154,6 +192,15 @@ impl Config {
             return Err(ConfigError::InvalidSessionTtl);
         }
 
+        // Validate the SSE subscription quotas: zero has no "unbounded"
+        // meaning, it simply locks every key out of the sync stream.
+        if self.max_sse_subscriptions_per_key == Some(0) {
+            return Err(ConfigError::InvalidMaxSseSubscriptionsPerKey);
+        }
+        if self.max_sse_subscriptions_global == Some(0) {
+            return Err(ConfigError::InvalidMaxSseSubscriptionsGlobal);
+        }
+
         Ok(())
     }
 
@@ -179,6 +226,28 @@ impl Config {
             self.session_ttl_secs
                 .unwrap_or(flaps_server::state::DEFAULT_SESSION_TTL_SECS),
         )
+    }
+
+    /// Returns the effective per-key SSE subscription ceiling.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    /// when [`Self::max_sse_subscriptions_per_key`] is omitted.
+    #[must_use]
+    pub fn effective_max_sse_subscriptions_per_key(&self) -> usize {
+        self.max_sse_subscriptions_per_key
+            .unwrap_or(flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY)
+    }
+
+    /// Returns the effective global SSE subscription ceiling.
+    ///
+    /// Falls back to
+    /// [`DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL`](flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
+    /// when [`Self::max_sse_subscriptions_global`] is omitted.
+    #[must_use]
+    pub fn effective_max_sse_subscriptions_global(&self) -> usize {
+        self.max_sse_subscriptions_global
+            .unwrap_or(flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL)
     }
 
     /// Returns the `bind_addr` parsed as a [`SocketAddr`].
@@ -393,6 +462,78 @@ session_ttl_secs  = 0
         assert!(
             matches!(result, Err(ConfigError::InvalidSessionTtl)),
             "expected InvalidSessionTtl for a zero session_ttl_secs, got {result:?}"
+        );
+    }
+
+    // -- max_sse_subscriptions_per_key / max_sse_subscriptions_global --
+
+    #[test]
+    fn load_omitted_sse_quota_uses_documented_defaults() {
+        let f = write_toml(
+            r#"
+database_url = "sqlite://flaps.db"
+bind_addr    = "127.0.0.1:8080"
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.max_sse_subscriptions_per_key, None);
+        assert_eq!(cfg.max_sse_subscriptions_global, None);
+        assert_eq!(
+            cfg.effective_max_sse_subscriptions_per_key(),
+            flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
+            "omitted max_sse_subscriptions_per_key must fall back to the documented default"
+        );
+        assert_eq!(
+            cfg.effective_max_sse_subscriptions_global(),
+            flaps_server::state::DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
+            "omitted max_sse_subscriptions_global must fall back to the documented default"
+        );
+    }
+
+    #[test]
+    fn load_explicit_sse_quota_is_applied() {
+        let f = write_toml(
+            r#"
+database_url                    = "sqlite://flaps.db"
+bind_addr                        = "127.0.0.1:8080"
+max_sse_subscriptions_per_key   = 3
+max_sse_subscriptions_global    = 50
+"#,
+        );
+        let cfg = Config::load(f.path().to_str().unwrap()).expect("load");
+        assert_eq!(cfg.effective_max_sse_subscriptions_per_key(), 3);
+        assert_eq!(cfg.effective_max_sse_subscriptions_global(), 50);
+    }
+
+    #[test]
+    fn load_zero_max_sse_subscriptions_per_key_returns_err() {
+        let f = write_toml(
+            r#"
+database_url                   = "sqlite://flaps.db"
+bind_addr                       = "127.0.0.1:8080"
+max_sse_subscriptions_per_key  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidMaxSseSubscriptionsPerKey)),
+            "expected InvalidMaxSseSubscriptionsPerKey, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_zero_max_sse_subscriptions_global_returns_err() {
+        let f = write_toml(
+            r#"
+database_url                  = "sqlite://flaps.db"
+bind_addr                      = "127.0.0.1:8080"
+max_sse_subscriptions_global  = 0
+"#,
+        );
+        let result = Config::load(f.path().to_str().unwrap());
+        assert!(
+            matches!(result, Err(ConfigError::InvalidMaxSseSubscriptionsGlobal)),
+            "expected InvalidMaxSseSubscriptionsGlobal, got {result:?}"
         );
     }
 

@@ -15,6 +15,7 @@ use flaps_store::repository::{
 };
 
 use crate::rate_limit::RateLimiter;
+use crate::sse_quota::{SseQuota, SseQuotaConfig};
 use crate::sync::SyncEvent;
 
 /// Bundles every store capability the server requires.
@@ -88,6 +89,32 @@ pub const DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND: f64 = 0.1;
 /// skip lagged ticks and re-sync on the next `GET /sync/v1/ruleset`.
 const EVENTS_CHANNEL_CAPACITY: usize = 256;
 
+/// Default per-key ceiling for concurrent `GET /sync/v1/events` subscriptions
+/// (see issue #111).
+///
+/// A well-behaved deployment holds a small, stable number of long-lived SSE
+/// connections per key (typically one per replica). Five gives headroom for
+/// rolling deploys and brief reconnect overlap without letting a compromised
+/// key, a reconnect storm, or a defective client open an unbounded number of
+/// streams.
+pub const DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY: usize = 5;
+
+/// Default global ceiling for concurrent `GET /sync/v1/events` subscriptions,
+/// summed across every SDK key (see issue #111).
+///
+/// Bounds total sockets, memory, and broadcast subscribers held for the
+/// lifetime of an SSE connection, independent of the per-key ceiling.
+pub const DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL: usize = 1000;
+
+/// `Retry-After` value (in seconds) sent with a 429 response when an SSE
+/// subscription attempt is rejected by [`SseQuota`] (see issue #111).
+///
+/// Concurrency quotas free up when an existing connection closes, which has
+/// no predictable schedule the way a token-bucket refill does; this constant
+/// is a documented, conservative retry guidance rather than a computed wait
+/// time.
+pub const SSE_QUOTA_RETRY_AFTER_SECS: u64 = 30;
+
 /// Shared application state. Cheap to clone (Arc-backed).
 #[derive(Clone)]
 pub struct AppState<S: Store> {
@@ -112,6 +139,9 @@ pub struct AppState<S: Store> {
     /// receive events; a send with no active receivers silently discards the
     /// event.
     pub events: broadcast::Sender<SyncEvent>,
+    /// Concurrency quota bounding live `GET /sync/v1/events` subscriptions,
+    /// per SDK key and globally (see issue #111).
+    pub sse_quota: Arc<SseQuota>,
 }
 
 impl<S: Store> AppState<S> {
@@ -137,6 +167,10 @@ impl<S: Store> AppState<S> {
             })),
             session_ttl: DEFAULT_SESSION_TTL,
             events,
+            sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {
+                max_global: DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
+                max_per_key: DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
+            })),
         }
     }
 
@@ -160,6 +194,23 @@ impl<S: Store> AppState<S> {
             login_rate_limiter,
             session_ttl,
             events,
+            sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {
+                max_global: DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
+                max_per_key: DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
+            })),
         }
+    }
+
+    /// Overrides the default SSE subscription quota.
+    ///
+    /// Used by `flapsd_lib::config::Config` to apply configured concurrency
+    /// limits for `GET /sync/v1/events`, and by tests that need non-default
+    /// quota values. Kept as a separate builder method (rather than a
+    /// [`Self::with_config`] parameter) so existing callers of
+    /// [`Self::with_config`] are unaffected.
+    #[must_use]
+    pub fn with_sse_quota(mut self, sse_quota: Arc<SseQuota>) -> Self {
+        self.sse_quota = sse_quota;
+        self
     }
 }
