@@ -35,7 +35,7 @@ use tokio_stream::{Stream, StreamExt};
 use crate::{
     auth::SdkKeyPrincipal,
     error::ApiError,
-    sse_quota::SseSubscriptionGuard,
+    sse_quota::{SseQuotaError, SseSubscriptionGuard},
     state::{AppState, SSE_QUOTA_RETRY_AFTER_SECS, Store},
 };
 
@@ -267,10 +267,30 @@ pub async fn get_events<S: Store>(
         .sse_quota
         .try_acquire(&principal.prefix)
         .map_err(|reason| {
+            // Report the active count and limit THAT ACTUALLY EXPLAIN this
+            // rejection reason: a `PerKeyLimitReached` line must show the
+            // per-key count against the per-key limit, not the unrelated
+            // global count against no limit at all, which reads as a
+            // contradiction (for example "active_subscriptions=7" next to a
+            // global limit of 1000).
+            let (active, limit) = match reason {
+                SseQuotaError::GlobalLimitReached => (
+                    state.sse_quota.active_subscriptions(),
+                    state.sse_quota.max_global(),
+                ),
+                SseQuotaError::PerKeyLimitReached => (
+                    state
+                        .sse_quota
+                        .active_subscriptions_for_key(&principal.prefix),
+                    state.sse_quota.max_per_key(),
+                ),
+            };
             tracing::warn!(
                 key_prefix = %principal.prefix,
                 ?reason,
-                active_subscriptions = state.sse_quota.active_subscriptions(),
+                active_subscriptions = active,
+                limit,
+                rejected_subscriptions_total = state.sse_quota.rejected_subscriptions(),
                 "sse subscription rejected: concurrency quota exceeded"
             );
             ApiError::TooManyRequests {

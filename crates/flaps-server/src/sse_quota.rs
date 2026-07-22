@@ -22,11 +22,25 @@ pub struct SseQuotaConfig {
     /// opposite convention from the sibling [`crate::rate_limit::RateLimiter`]
     /// primitive, which expresses "no limit" as an `enabled` flag
     /// (`RateLimiter::disabled()`) rather than as a numeric edge case.
+    ///
+    /// Must not exceed [`tokio::sync::Semaphore::MAX_PERMITS`]: this value is
+    /// handed directly to a `Semaphore::new` in [`SseQuota::new`], which
+    /// panics eagerly, at construction time, if it is exceeded. `flapsd`'s
+    /// own configuration validation rejects an out-of-range value before it
+    /// ever reaches here; a downstream embedder of this library that
+    /// constructs an [`SseQuota`] directly is responsible for the same check.
     pub max_global: usize,
     /// Maximum number of concurrent SSE subscriptions for a single SDK key.
     ///
     /// Zero means "reject every subscription", NOT "unlimited"; see
     /// [`Self::max_global`] for the same caveat.
+    ///
+    /// Must not exceed [`tokio::sync::Semaphore::MAX_PERMITS`]; unlike
+    /// [`Self::max_global`], this bound is NOT checked at [`SseQuota::new`]
+    /// time. Each SDK key's semaphore is created lazily, on that key's first
+    /// [`SseQuota::try_acquire`] call, so an out-of-range value panics lazily,
+    /// inside that call, the first time any key is used, rather than eagerly
+    /// at construction.
     pub max_per_key: usize,
 }
 
@@ -101,6 +115,7 @@ pub struct SseQuota {
     // `Arc::strong_count(sem) == 1` (no in-flight acquire holds a clone)
     // before removing an entry.
     per_key: Mutex<HashMap<String, Arc<Semaphore>>>,
+    max_global: usize,
     max_per_key: usize,
     active_subscriptions: Arc<AtomicU64>,
     rejected_subscriptions: AtomicU64,
@@ -108,11 +123,20 @@ pub struct SseQuota {
 
 impl SseQuota {
     /// Builds a quota from the given configuration.
+    ///
+    /// # Panics
+    /// Panics if `config.max_global` exceeds
+    /// [`tokio::sync::Semaphore::MAX_PERMITS`] (the underlying
+    /// `Semaphore::new` call panics). `config.max_per_key` is not validated
+    /// here: it is only checked, lazily, the first time it is used to build a
+    /// per-key semaphore inside [`Self::try_acquire`], so an out-of-range
+    /// `max_per_key` does NOT panic at construction time.
     #[must_use]
     pub fn new(config: SseQuotaConfig) -> Self {
         Self {
             global: Arc::new(Semaphore::new(config.max_global)),
             per_key: Mutex::new(HashMap::new()),
+            max_global: config.max_global,
             max_per_key: config.max_per_key,
             active_subscriptions: Arc::new(AtomicU64::new(0)),
             rejected_subscriptions: AtomicU64::new(0),
@@ -158,7 +182,8 @@ impl SseQuota {
         })
     }
 
-    /// Returns the current number of live SSE subscriptions.
+    /// Returns the current number of live SSE subscriptions, across every
+    /// SDK key (the counter behind the GLOBAL ceiling, [`Self::max_global`]).
     #[must_use]
     pub fn active_subscriptions(&self) -> u64 {
         self.active_subscriptions.load(Ordering::Relaxed)
@@ -169,6 +194,51 @@ impl SseQuota {
     #[must_use]
     pub fn rejected_subscriptions(&self) -> u64 {
         self.rejected_subscriptions.load(Ordering::Relaxed)
+    }
+
+    /// Returns the configured global concurrency ceiling.
+    ///
+    /// Lets callers on the rejection path (see `flaps_server::sync`) log a
+    /// [`SseQuotaError::GlobalLimitReached`] rejection as "N/limit" rather
+    /// than a bare active count with nothing to compare it against.
+    #[must_use]
+    pub fn max_global(&self) -> usize {
+        self.max_global
+    }
+
+    /// Returns the configured per-key concurrency ceiling.
+    ///
+    /// Lets callers on the rejection path (see `flaps_server::sync`) log a
+    /// [`SseQuotaError::PerKeyLimitReached`] rejection as "N/limit" rather
+    /// than a bare active count with nothing to compare it against.
+    #[must_use]
+    pub fn max_per_key(&self) -> usize {
+        self.max_per_key
+    }
+
+    /// Returns the current number of live SSE subscriptions for `key` alone
+    /// (the counter behind the PER-KEY ceiling, [`Self::max_per_key`]), as
+    /// opposed to [`Self::active_subscriptions`], which is global.
+    ///
+    /// Takes the per-key map lock, released before returning. This is meant
+    /// for the rejection path, which is cold: re-taking the lock here (on
+    /// top of the one already taken and released inside
+    /// [`Self::try_acquire`]) is cheap, and this method never holds the
+    /// per-key lock and a semaphore permit acquisition at the same time.
+    /// A key that never called [`Self::try_acquire`] reports zero rather
+    /// than creating an entry.
+    #[must_use]
+    pub fn active_subscriptions_for_key(&self, key: &str) -> u64 {
+        let per_key = self
+            .per_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        per_key.get(key).map_or(0, |semaphore| {
+            let held = self
+                .max_per_key
+                .saturating_sub(semaphore.available_permits());
+            u64::try_from(held).unwrap_or(u64::MAX)
+        })
     }
 }
 
@@ -344,6 +414,42 @@ mod tests {
         assert!(
             quota.try_acquire("key-a").is_ok(),
             "slot must be usable again after the guard is dropped"
+        );
+    }
+
+    /// The rejection log (see `flaps_server::sync`) needs the configured
+    /// ceilings, not just the live counters, so that a `PerKeyLimitReached`
+    /// rejection can report "N/limit" instead of a bare count with no limit
+    /// to compare it against.
+    #[test]
+    fn max_global_and_max_per_key_expose_the_configured_ceilings() {
+        let quota = SseQuota::new(config(42, 7));
+        assert_eq!(quota.max_global(), 42);
+        assert_eq!(quota.max_per_key(), 7);
+    }
+
+    /// `active_subscriptions()` is the GLOBAL counter; the rejection log
+    /// needs the PER-KEY count for a `PerKeyLimitReached` rejection, which is
+    /// generally not the same number.
+    #[test]
+    fn active_subscriptions_for_key_reflects_only_that_key() {
+        let quota = SseQuota::new(config(10, 5));
+        let _a1 = quota
+            .try_acquire("key-a")
+            .expect("first key-a must succeed");
+        let _a2 = quota
+            .try_acquire("key-a")
+            .expect("second key-a must succeed");
+        let _b1 = quota
+            .try_acquire("key-b")
+            .expect("first key-b must succeed");
+
+        assert_eq!(quota.active_subscriptions_for_key("key-a"), 2);
+        assert_eq!(quota.active_subscriptions_for_key("key-b"), 1);
+        assert_eq!(
+            quota.active_subscriptions_for_key("key-never-seen"),
+            0,
+            "a key that never acquired must report zero, not panic or create an entry"
         );
     }
 }
