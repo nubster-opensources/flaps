@@ -1,0 +1,22 @@
+[package]
+name = "flaps-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+flaps-eval = { path = "../crates/flaps-eval" }
+libfuzzer-sys = "0.4"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "flagset_from_json"
+path = "fuzz_targets/flagset_from_json.rs"
+test = false
+doc = false
+bench = false
