@@ -17,8 +17,11 @@ use flaps_domain::{
     Environment, EnvironmentKey, Flag, FlagEnvConfig, FlagKey, FlagType, ManagedBy, Project,
     ProjectKey, ServeTarget, ValueType, VariantKey, VariantValue, Variants,
 };
-use flaps_server::{bootstrap_admin, build_router, state::AppState};
-use flaps_store::{hash::KeyHasher, sqlite::SqliteStore};
+use flaps_server::{
+    bootstrap_admin, build_router,
+    state::{AppState, Store},
+};
+use flaps_store::{hash::KeyHasher, postgres::PostgresStore, sqlite::SqliteStore};
 use http_body_util::BodyExt;
 use tokio::sync::Barrier;
 use tower::ServiceExt;
@@ -31,17 +34,31 @@ use tower::ServiceExt;
 const ADMIN_USER: &str = "test-admin";
 const ADMIN_PASS: &str = "test-admin-password";
 
-async fn make_store() -> SqliteStore {
+async fn make_sqlite_store() -> SqliteStore {
     let hasher = KeyHasher::new(b"00000000000000000000000000000000".to_vec());
     SqliteStore::in_memory(hasher)
         .await
         .expect("in-memory store")
 }
 
+/// Connects to the PostgreSQL instance named by `FLAPS_TEST_POSTGRES_URL`,
+/// or `None` if the variable is unset (local development without Postgres).
+/// Mirrors the skip-silently convention used by `crates/flaps-store/tests/postgres.rs`.
+async fn maybe_make_postgres_store() -> Option<PostgresStore> {
+    let url = std::env::var("FLAPS_TEST_POSTGRES_URL").ok()?;
+    let hasher = KeyHasher::new(b"concurrency-test-pepper-32-bytes".to_vec());
+    Some(
+        PostgresStore::connect(&url, hasher)
+            .await
+            .expect("connect to FLAPS_TEST_POSTGRES_URL"),
+    )
+}
+
 /// Builds an app, its `AppState` (for direct cache inspection) and a valid
-/// admin session token.
-async fn make_authed_app() -> (axum::Router, AppState<SqliteStore>, String) {
-    let store = make_store().await;
+/// admin session token around an already-constructed store, generic over the
+/// backend so the same test body proves SQLite and PostgreSQL equivalent
+/// (issue #108's "SQLite and PostgreSQL provide equivalent behavior").
+async fn make_authed_app<S: Store>(store: S) -> (axum::Router, AppState<S>, String) {
     bootstrap_admin(&store, ADMIN_USER, ADMIN_PASS)
         .await
         .expect("bootstrap admin");
@@ -214,9 +231,9 @@ async fn setup_project_env(app: &axum::Router, token: &str, project: &str, env: 
 // If-Match ETag must yield exactly one success and one 412.
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_put_flag_same_etag_yields_exactly_one_success() {
-    let (app, _state, token) = make_authed_app().await;
+/// Store-agnostic body: proves #108 for any `S: Store` backend.
+async fn assert_concurrent_put_flag_same_etag_yields_exactly_one_success<S: Store>(store: S) {
+    let (app, _state, token) = make_authed_app(store).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     let flag = bool_flag("beta-flag");
@@ -274,14 +291,32 @@ async fn concurrent_put_flag_same_etag_yields_exactly_one_success() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_put_flag_same_etag_yields_exactly_one_success_sqlite() {
+    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(make_sqlite_store().await)
+        .await;
+}
+
+/// CI-only mirror of the SQLite race test above, proving Postgres behaves
+/// identically. Skips silently when `FLAPS_TEST_POSTGRES_URL` is unset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_put_flag_same_etag_yields_exactly_one_success_postgres() {
+    let Some(store) = maybe_make_postgres_store().await else {
+        return;
+    };
+    assert_concurrent_put_flag_same_etag_yields_exactly_one_success(store).await;
+}
+
 // ---------------------------------------------------------------------------
 // #105: two concurrent mutations to DISTINCT flags in one environment must
 // leave BOTH changes in the cached ruleset, with a strictly higher version.
 // ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache() {
-    let (app, state, token) = make_authed_app().await;
+/// Store-agnostic body: proves #105 for any `S: Store` backend.
+async fn assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache<S: Store>(
+    store: S,
+) {
+    let (app, state, token) = make_authed_app(store).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     for key in ["flag-a", "flag-b"] {
@@ -376,6 +411,24 @@ async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache_sqlite() {
+    assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache(
+        make_sqlite_store().await,
+    )
+    .await;
+}
+
+/// CI-only mirror of the SQLite race test above, proving Postgres behaves
+/// identically. Skips silently when `FLAPS_TEST_POSTGRES_URL` is unset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache_postgres() {
+    let Some(store) = maybe_make_postgres_store().await else {
+        return;
+    };
+    assert_concurrent_put_flag_env_config_distinct_flags_both_present_in_cache(store).await;
+}
+
 // ---------------------------------------------------------------------------
 // #105 (ordering pin): deleting a flag with an existing flag_env_config must
 // evict the flag from the environment's cached ruleset, even though deleting
@@ -385,7 +438,7 @@ async fn concurrent_put_flag_env_config_distinct_flags_both_present_in_cache() {
 
 #[tokio::test]
 async fn delete_flag_with_env_config_recompiles_env_from_committed_state() {
-    let (app, state, token) = make_authed_app().await;
+    let (app, state, token) = make_authed_app(make_sqlite_store().await).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     let resp = app
@@ -451,7 +504,7 @@ async fn delete_flag_with_env_config_recompiles_env_from_committed_state() {
 
 #[tokio::test]
 async fn if_match_star_on_missing_flag_is_412() {
-    let (app, _state, token) = make_authed_app().await;
+    let (app, _state, token) = make_authed_app(make_sqlite_store().await).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     let resp = app
@@ -471,7 +524,7 @@ async fn if_match_star_on_missing_flag_is_412() {
 
 #[tokio::test]
 async fn if_none_match_star_guards_create_only_semantics() {
-    let (app, _state, token) = make_authed_app().await;
+    let (app, _state, token) = make_authed_app(make_sqlite_store().await).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     let flag = bool_flag("create-once-flag");
@@ -507,7 +560,7 @@ async fn if_none_match_star_guards_create_only_semantics() {
 
 #[tokio::test]
 async fn if_match_list_matches_any_member() {
-    let (app, _state, token) = make_authed_app().await;
+    let (app, _state, token) = make_authed_app(make_sqlite_store().await).await;
     setup_project_env(&app, &token, "proj", "prod").await;
 
     let flag = bool_flag("list-flag");
