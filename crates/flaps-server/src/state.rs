@@ -1,10 +1,10 @@
 //! Application state and the `Store` supertrait.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock, broadcast};
 
 use flaps_compiler::CompiledRuleset;
 use flaps_domain::{EnvironmentKey, ProjectKey};
@@ -142,6 +142,11 @@ pub struct AppState<S: Store> {
     /// Concurrency quota bounding live `GET /sync/v1/events` subscriptions,
     /// per SDK key and globally (see issue #111).
     pub sse_quota: Arc<SseQuota>,
+    /// Per-project mutation locks, keyed by project.
+    ///
+    /// See [`Self::lock_project`] for the concurrency contract and the
+    /// documented single-writer (single-daemon) assumption.
+    mutation_locks: Arc<StdMutex<HashMap<ProjectKey, Arc<AsyncMutex<()>>>>>,
 }
 
 impl<S: Store> AppState<S> {
@@ -171,6 +176,7 @@ impl<S: Store> AppState<S> {
                 max_global: DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
                 max_per_key: DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
             })),
+            mutation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -198,6 +204,7 @@ impl<S: Store> AppState<S> {
                 max_global: DEFAULT_MAX_SSE_SUBSCRIPTIONS_GLOBAL,
                 max_per_key: DEFAULT_MAX_SSE_SUBSCRIPTIONS_PER_KEY,
             })),
+            mutation_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -212,5 +219,125 @@ impl<S: Store> AppState<S> {
     pub fn with_sse_quota(mut self, sse_quota: Arc<SseQuota>) -> Self {
         self.sse_quota = sse_quota;
         self
+    }
+
+    /// Acquires the per-project mutation lock, creating it on first use.
+    ///
+    /// # Single-writer assumption
+    ///
+    /// This lock serializes every in-scope mutation (`PUT`/`DELETE` of
+    /// project, environment, flag, segment, `flag_env_config`) that targets
+    /// the same project **within this process**. It is an in-process
+    /// concurrency control, not a distributed one: it does nothing to
+    /// coordinate writes issued by a second `flapsd` process against the
+    /// same database. `flapsd` is deployed as a single writer per database
+    /// today (each daemon owns its own in-memory [`Self::cache`] and
+    /// [`Self::events`] broadcast channel, so a second daemon would already
+    /// be an independent, uncoordinated cache); a database-level
+    /// compare-and-swap is the documented evolution for a future
+    /// multi-daemon deployment.
+    ///
+    /// Callers must hold the returned guard for the entire mutation cycle:
+    /// from before reading the resource for the `If-Match` check, through
+    /// the store write, through recompiling and installing the affected
+    /// rulesets. Holding it across that whole `.await` chain is what makes
+    /// the precondition check atomic with the write (#108) and guarantees
+    /// the cache is always recompiled from the last committed state (#105).
+    pub async fn lock_project(&self, project: &ProjectKey) -> OwnedMutexGuard<()> {
+        let project_mutex = {
+            // Short, synchronous critical section: no `.await` while holding
+            // the registry lock, so a `std::sync::Mutex` is appropriate here
+            // (a `tokio::sync::Mutex` would add unneeded async overhead).
+            let mut registry = self
+                .mutation_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .entry(project.clone())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        project_mutex.lock_owned().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use flaps_store::{KeyHasher, sqlite::SqliteStore};
+
+    use super::AppState;
+    use flaps_domain::ProjectKey;
+
+    async fn make_store() -> SqliteStore {
+        SqliteStore::in_memory(KeyHasher::new(b"test-pepper-32-bytes-long-enough"))
+            .await
+            .expect("in-memory store")
+    }
+
+    /// Two concurrent `lock_project` calls on the SAME project key must never
+    /// hold the critical section at the same time. Uses a `Barrier` to force
+    /// genuine overlap of the two tasks (never a timing sleep), and an atomic
+    /// high-water mark of concurrent entrants to detect any overlap
+    /// deterministically, regardless of scheduling order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lock_project_serializes_same_project() {
+        let store = make_store().await;
+        let state = AppState::new(store);
+        let project = ProjectKey::new("proj").unwrap();
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let concurrent_entrants = std::sync::Arc::new(AtomicU32::new(0));
+        let max_concurrent_entrants = std::sync::Arc::new(AtomicU32::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            let project = project.clone();
+            let barrier = barrier.clone();
+            let concurrent_entrants = concurrent_entrants.clone();
+            let max_concurrent_entrants = max_concurrent_entrants.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let _guard = state.lock_project(&project).await;
+
+                let current = concurrent_entrants.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent_entrants.fetch_max(current, Ordering::SeqCst);
+                // Yield cooperatively to give the other task every chance to
+                // observe (and prove) an overlap, without a wall-clock sleep.
+                tokio::task::yield_now().await;
+                concurrent_entrants.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task must not panic");
+        }
+
+        assert_eq!(
+            max_concurrent_entrants.load(Ordering::SeqCst),
+            1,
+            "lock_project must serialize mutations against the same project"
+        );
+    }
+
+    /// Locks for DIFFERENT projects must not exclude one another: the map is
+    /// keyed per-project, not a single global mutex.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lock_project_does_not_serialize_distinct_projects() {
+        let store = make_store().await;
+        let state = AppState::new(store);
+        let project_a = ProjectKey::new("proj-a").unwrap();
+        let project_b = ProjectKey::new("proj-b").unwrap();
+
+        // Both guards are held concurrently; if lock_project used one global
+        // lock this would deadlock (the second call would never return while
+        // the first guard is alive on the same task set), so a bounded join
+        // succeeding is itself the proof of independence.
+        let guard_a = state.lock_project(&project_a).await;
+        let guard_b = state.lock_project(&project_b).await;
+        drop(guard_a);
+        drop(guard_b);
     }
 }
