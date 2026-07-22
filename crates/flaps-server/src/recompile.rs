@@ -408,10 +408,10 @@ pub async fn recompile_environment<S: Store>(
 /// best-effort repair step, so a failure recompiling one environment (a
 /// transient store error, a dropped connection) must never abort the
 /// remaining environments in `affected`. Every environment is attempted;
-/// failures are collected and logged with [`tracing::error!`] (project and
-/// environment key included, so an operator can identify exactly which
-/// environment's cache is stale), never propagated as an `Err` that would
-/// turn an already-committed write into an HTTP 500. The affected
+/// failures are logged with [`tracing::error!`] (project and environment key
+/// included, so an operator can identify exactly which environment's cache
+/// is stale), never propagated as an `Err` that would turn an
+/// already-committed write into an HTTP 500. The affected
 /// environment's cached ruleset is simply left as it was (stale, or absent)
 /// until the next mutation that recomputes it, or a daemon restart that
 /// rebuilds the whole cache from the store.
