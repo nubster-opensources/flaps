@@ -175,6 +175,15 @@ value (`W/"..."`) is never treated specially and simply never matches. Quoted
 (`"abc123"`) and unquoted (`abc123`) forms are both accepted; surrounding
 quotes are stripped before comparison.
 
+A client may send `If-Match` as several repeated field-lines instead of one
+comma-separated line; per
+[RFC 7230 §3.2.2](https://www.rfc-editor.org/rfc/rfc7230#section-3.2.2) the
+server joins every field-line into a single comma-separated value before
+evaluating it, exactly as if the client had sent one line. A header value
+(any field-line) that is not valid ASCII fails the request with `422
+Unprocessable Entity` rather than being silently treated as absent: a
+malformed precondition must never fail open.
+
 This is the only conditional mechanism the admin CRUD routes support for
 existing resources. Note in particular: the single-resource `GET` routes
 (`GET /projects/{project}` and its siblings) always return `200` with an
@@ -200,6 +209,11 @@ serves is the "create, never overwrite" idiom:
   `422 Unprocessable Entity`. This unsupported form is rejected rather than
   silently ignored, since ignoring it would let a write proceed while the
   client believes it sent an active precondition.
+
+Like `If-Match` (4.1), repeated `If-None-Match` field-lines are joined per
+RFC 7230 §3.2.2 into one comma-separated value before evaluation, and a
+header value that is not valid ASCII fails with `422 Unprocessable Entity`
+rather than being silently treated as absent.
 
 This is independent of `If-Match` (4.1): a request may carry either, both, or
 neither. Carrying both is unusual but well-defined, since both are evaluated
@@ -281,7 +295,9 @@ Two categories are worth calling out because they are easy to conflate:
 
 - `422 invalid-body`: the request failed structural or key-format validation
   (a path key is not valid kebab-case, or a path key does not match the body's
-  key). This never touches the database.
+  key), **or** a precondition header (`If-Match` / `If-None-Match`, see 4.1
+  and 4.2) was malformed: not valid ASCII, or an `If-None-Match` value other
+  than `*`. This never touches the database.
 - `400 validation-error`: the request is well-formed, but applying it would
   produce a ruleset that fails to compile (for example, a targeting rule
   referencing a segment key that does not exist). flaps validates every
