@@ -247,7 +247,7 @@ impl Stream for QuotaBoundStream {
 /// - 403: client-kind SDK key.
 /// - 429: the per-key or global concurrent-subscription quota is exhausted.
 ///   `Retry-After` is set (see
-///   [`SSE_QUOTA_RETRY_AFTER_SECS`](crate::state::SSE_QUOTA_RETRY_AFTER_SECS)).
+///   [`crate::state::SSE_QUOTA_RETRY_AFTER_SECS`]).
 ///   This endpoint does not apply the ordinary per-request rate limiter, so a
 ///   429 here always means the concurrency quota. Clients should back off
 ///   (e.g. full-jitter exponential backoff) rather than reconnect immediately.
