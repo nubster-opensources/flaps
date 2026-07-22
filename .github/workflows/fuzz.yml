@@ -1,20 +1,14 @@
 name: Fuzz
 
+# The triggers deliberately carry no paths filter. A path-filtered workflow
+# reports no status at all when the filter does not match, and a required
+# check that is never reported leaves a pull request pending forever. The
+# filtering happens inside the job instead, so the check always reports.
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "crates/flaps-eval/**"
-      - "fuzz/**"
-      - "Cargo.lock"
-      - ".github/workflows/fuzz.yml"
   push:
     branches: [main]
-    paths:
-      - "crates/flaps-eval/**"
-      - "fuzz/**"
-      - "Cargo.lock"
-      - ".github/workflows/fuzz.yml"
   schedule:
     - cron: "41 2 * * 1"
   workflow_dispatch:
@@ -40,17 +34,57 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Decide whether this change can reach a fuzz target
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "in-scope=true" >>"$GITHUB_OUTPUT"
+            echo "every non pull-request trigger fuzzes unconditionally"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          if printf '%s\n' "$changed" | grep -qE '^(crates/flaps-eval/|fuzz/|Cargo\.lock$|\.github/workflows/fuzz\.yml$)'; then
+            echo "in-scope=true" >>"$GITHUB_OUTPUT"
+            echo "a fuzzed parser or the fuzz workspace changed"
+          else
+            echo "in-scope=false" >>"$GITHUB_OUTPUT"
+            echo "no fuzzed parser changed; reporting success without building"
+          fi
       - uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0 action
+        if: steps.scope.outputs.in-scope == 'true'
         with:
           toolchain: nightly-2026-07-15
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.scope.outputs.in-scope == 'true'
         with:
           key: fuzz
           workspaces: "fuzz -> target"
-      - run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Install cargo-fuzz
+        if: steps.scope.outputs.in-scope == 'true'
+        run: cargo install --locked cargo-fuzz --version 0.13.2
       - name: Fast pull-request corpus
-        if: github.event_name == 'pull_request'
-        run: cargo fuzz run flagset_from_json -- -runs=10000 -max_len=65536
+        if: steps.scope.outputs.in-scope == 'true' && github.event_name == 'pull_request'
+        run: |
+          echo "target=flagset_from_json budget=10000 runs max_len=65536"
+          echo "reproduce a crash with: RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN cargo fuzz run flagset_from_json <artifact>"
+          cargo fuzz run flagset_from_json -- -runs=10000 -max_len=65536
       - name: Extended main and scheduled corpus
-        if: github.event_name != 'pull_request'
-        run: cargo fuzz run flagset_from_json -- -max_total_time=300 -max_len=1048576
+        if: steps.scope.outputs.in-scope == 'true' && github.event_name != 'pull_request'
+        run: |
+          echo "target=flagset_from_json budget=300s max_len=1048576"
+          echo "reproduce a crash with: RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN cargo fuzz run flagset_from_json <artifact>"
+          cargo fuzz run flagset_from_json -- -max_total_time=300 -max_len=1048576
+      - name: Preserve crashing inputs
+        if: always() && steps.scope.outputs.in-scope == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fuzz-artifacts-flagset-from-json
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
