@@ -270,6 +270,7 @@ pub async fn get_events<S: Store>(
             tracing::warn!(
                 key_prefix = %principal.prefix,
                 ?reason,
+                active_subscriptions = state.sse_quota.active_subscriptions(),
                 "sse subscription rejected: concurrency quota exceeded"
             );
             ApiError::TooManyRequests {
