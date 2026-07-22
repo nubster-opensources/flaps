@@ -378,6 +378,38 @@ pub async fn recompile_environment<S: Store>(
     Ok(())
 }
 
+/// Recompiles `affected` environments directly from the just-committed store
+/// state and installs each into the cache (the #105 fix): the cache always
+/// ends up reflecting the last committed mutation, never a pre-write
+/// snapshot that a differently-ordered concurrent write could make stale.
+///
+/// # Ordering requirement
+///
+/// `affected` must be computed with [`affected_environments`] (directly, or
+/// via the environment keys on the [`CompiledRuleset`]s returned by
+/// [`validate_by_compiling`]) called **before** the store write it follows,
+/// not derived by re-querying the store afterwards. Some writes cascade:
+/// deleting a flag also deletes its `flag_env_config` rows, which is exactly
+/// the evidence a post-write [`affected_environments`] call for
+/// [`Change::DeleteFlag`] would need to discover which environments were
+/// affected. Querying it after the delete would return an empty set and
+/// silently leave those environments' cached rulesets stale.
+///
+/// Callers must hold the caller's per-project mutation lock
+/// ([`AppState::lock_project`](crate::state::AppState::lock_project)) across
+/// the write and this call, so no other in-scope mutation for the same
+/// project can install a conflicting ruleset in between.
+pub async fn recompile_committed<S: Store>(
+    state: &AppState<S>,
+    project: &ProjectKey,
+    affected: &[EnvironmentKey],
+) -> Result<(), ApiError> {
+    for environment in affected {
+        recompile_environment(state, project, environment).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use flaps_domain::{
@@ -548,6 +580,95 @@ mod tests {
         assert!(
             !cache.contains_key(&(project, env_key)),
             "cache must remain empty when compilation fails"
+        );
+    }
+
+    /// `recompile_committed` recompiles every listed environment directly
+    /// from current store content, discarding whatever a stale cache entry
+    /// held -- the #105 fix's core promise: the cache always ends up
+    /// reflecting the last committed store state, never a pre-write snapshot.
+    #[tokio::test]
+    async fn recompile_committed_replaces_stale_cache_with_committed_store_state() {
+        let store = make_store().await;
+        let project = ProjectKey::new("proj").unwrap();
+        let env_a = EnvironmentKey::new("env-a").unwrap();
+        let env_b = EnvironmentKey::new("env-b").unwrap();
+
+        store
+            .upsert_project(
+                "test",
+                &Project {
+                    key: project.clone(),
+                    name: "Proj".into(),
+                    description: None,
+                    external_ref: None,
+                    managed_by: ManagedBy::Local,
+                },
+            )
+            .await
+            .unwrap();
+        for env_key in [&env_a, &env_b] {
+            store
+                .upsert_environment(
+                    "test",
+                    &project,
+                    &Environment {
+                        key: env_key.clone(),
+                        name: env_key.as_str().to_owned(),
+                        external_ref: None,
+                        managed_by: ManagedBy::Local,
+                        metadata: flaps_domain::Metadata::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let flag = seed_bool_flag(&store, &project, "my-flag").await;
+        let config = FlagEnvConfig {
+            enabled: true,
+            rules: vec![],
+            default_rule: ServeTarget::Fixed(VariantKey::new("on").unwrap()),
+        };
+        store
+            .upsert_flag_env_config("test", &project, &flag.key, &env_a, &config)
+            .await
+            .unwrap();
+        store
+            .upsert_flag_env_config("test", &project, &flag.key, &env_b, &config)
+            .await
+            .unwrap();
+
+        let state = AppState::new(store);
+
+        // Seed a deliberately stale cache entry for env_a: a lower version
+        // and a document that does not match current store content.
+        install_in_cache(
+            &state,
+            &project,
+            vec![CompiledRuleset {
+                environment: env_a.clone(),
+                document: "{}".to_owned(),
+                content_hash: "stale-hash".to_owned(),
+                version: 1,
+            }],
+        )
+        .await;
+
+        let result = recompile_committed(&state, &project, std::slice::from_ref(&env_a)).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let cache = state.cache.read().await;
+        let recompiled = cache
+            .get(&(project.clone(), env_a.clone()))
+            .expect("env_a must be present after recompile_committed");
+        assert_ne!(
+            recompiled.content_hash, "stale-hash",
+            "recompile_committed must replace the stale document with committed store state"
+        );
+        // env_b was never listed in `affected`, so it must remain absent.
+        assert!(
+            !cache.contains_key(&(project.clone(), env_b.clone())),
+            "recompile_committed must not touch environments outside `affected`"
         );
     }
 }
