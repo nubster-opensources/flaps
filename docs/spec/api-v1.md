@@ -187,14 +187,19 @@ frequently (see 4.3).
 `PUT` on Project, Environment, Flag, Segment and FlagEnvConfig additionally
 accepts an optional `If-None-Match` request header, evaluated per
 [RFC 7232 §3.2](https://www.rfc-editor.org/rfc/rfc7232#section-3.2). Only the
-`*` value is supported here (the general listed-ETags form of
-`If-None-Match` exists to make `GET` conditional, which this write-side guard
-has no use for):
+`*` value is supported: the general listed-ETags form of `If-None-Match` is a
+well-defined RFC 7232 precondition for non-`GET` methods too, but this API
+does not implement it here, since the only write-side use case this guard
+serves is the "create, never overwrite" idiom:
 
 - `If-None-Match: *`: the write proceeds only if the resource does **not**
   currently exist (a "create, never overwrite" guard). If it already exists,
   the request fails with `412 Precondition Failed` and nothing is written.
-- Any other value, or the header absent: no precondition from this guard.
+- Header absent: no precondition from this guard.
+- Any other value (the unsupported listed-ETags form): the request fails with
+  `422 Unprocessable Entity`. This unsupported form is rejected rather than
+  silently ignored, since ignoring it would let a write proceed while the
+  client believes it sent an active precondition.
 
 This is independent of `If-Match` (4.1): a request may carry either, both, or
 neither. Carrying both is unusual but well-defined, since both are evaluated

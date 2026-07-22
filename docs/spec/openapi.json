@@ -66,7 +66,7 @@
         "in": "header",
         "required": false,
         "schema": { "type": "string" },
-        "description": "Optional strong ETag precondition for optimistic concurrency control (RFC 7232 SS3.1), checked atomically with the write. Accepts a single ETag, a comma-separated list (matches if any member equals the current ETag), or '*' (matches if the resource currently exists). Quoted and unquoted forms are both accepted. Weak ETags (W/\"...\") are never emitted or specially handled: every ETag in this API is strong. On no match -- including '*' against a resource that does not currently exist -- the request fails with 412 Precondition Failed and no write occurs."
+        "description": "Optional strong ETag precondition for optimistic concurrency control (RFC 7232 SS3.1), checked atomically with the write. Accepts a single ETag, a comma-separated list (matches if any member equals the current ETag), or '*' (matches if the resource currently exists); repeated If-Match field-lines are joined per RFC 7230 SS3.2.2 and evaluated as one list, exactly like a single comma-separated line. Quoted and unquoted forms are both accepted. Weak ETags (W/\"...\") are never emitted or specially handled: every ETag in this API is strong. On no match -- including '*' against a resource that does not currently exist -- the request fails with 412 Precondition Failed and no write occurs. A header value that is not valid ASCII fails the request with 422 Unprocessable Entity rather than being silently treated as absent."
       },
       "IfNoneMatchHeader": {
         "name": "If-None-Match",
@@ -80,7 +80,7 @@
         "in": "header",
         "required": false,
         "schema": { "type": "string" },
-        "description": "Optional create-only guard (RFC 7232 SS3.2), checked atomically with the write. Only the '*' value is supported: it fails the request with 412 Precondition Failed (and no write occurs) if the resource already exists. Any other value is ignored. Independent of If-Match: a request may carry either, both, or neither."
+        "description": "Optional create-only guard (RFC 7232 SS3.2), checked atomically with the write; repeated If-None-Match field-lines are joined per RFC 7230 SS3.2.2 and evaluated as one list, exactly like a single comma-separated line. Only the '*' value is supported: it fails the request with 412 Precondition Failed (and no write occurs) if the resource already exists. The general listed-ETags form of If-None-Match is well-defined by RFC 7232 for non-GET methods too, but is not implemented here; supplying it fails the request with 422 Unprocessable Entity rather than being silently ignored. A header value that is not valid ASCII fails the request with 422 Unprocessable Entity for the same reason: a malformed precondition must never be silently treated as absent. Independent of If-Match: a request may carry either, both, or neither."
       }
     },
     "headers": {
