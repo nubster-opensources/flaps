@@ -43,3 +43,22 @@ updates:
       # (1.88 = Rust 1.88), not the action's own semver. Bumps are
       # driven by the MSRV policy, not by dependabot.
       - dependency-name: "dtolnay/rust-toolchain"
+
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 5
+    groups:
+      fuzz-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(fuzz-deps)"
+      include: "scope"
+    labels:
+      - "kind:chore"
