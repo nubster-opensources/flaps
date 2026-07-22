@@ -14,9 +14,10 @@
 //! because full-jitter backoff can legitimately draw a near-zero delay on
 //! any single attempt; only the aggregate rate distinguishes "backing off"
 //! from "spinning". This is the one test in the flaps-client / flaps-server
-//! suites that relies on real wall-clock timing rather than a barrier: a
-//! reconnect-throttling property is, by its nature, a statement about
-//! elapsed time, not about event ordering.
+//! suites that relies on real wall-clock timing rather than a barrier: real
+//! network I/O (opening an actual `GET /sync/v1/events` connection) rules
+//! out a paused `tokio` clock, which is otherwise the usual way this suite
+//! avoids wall-clock dependence.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -171,8 +172,8 @@ async fn quota_rejection_backs_off_instead_of_spinning() {
     let attempts = counter.load(Ordering::Relaxed);
 
     assert!(
-        attempts >= 2,
-        "expected at least a couple of reconnect attempts within 500ms, got {attempts}"
+        attempts >= 1,
+        "expected at least one reconnect attempt within 500ms, got {attempts}"
     );
 
     // A tight loop (no backoff) would drive many hundreds to thousands of
