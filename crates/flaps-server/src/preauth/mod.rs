@@ -4,5 +4,7 @@
 //! Every piece here exists to enforce a single ordering rule: the control that
 //! bounds a cost always runs before the cost itself.
 
+pub mod budget;
+pub mod client_address;
 pub mod limiter_key;
 pub mod limits;
