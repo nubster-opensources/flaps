@@ -9,3 +9,4 @@ pub mod client_address;
 pub mod limiter_key;
 pub mod limits;
 pub mod password_pool;
+pub mod sdk_key_shape;

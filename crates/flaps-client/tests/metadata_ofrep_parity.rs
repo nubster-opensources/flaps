@@ -34,7 +34,10 @@ use tokio::time::timeout;
 const PROJECT: &str = "metadata-oracle-proj";
 const ENVIRONMENT: &str = "metadata-oracle-env";
 const FLAG: &str = "metadata-oracle-flag";
-const SDK_SECRET: &str = "s-metadata-oracle-server-0123456789";
+// Well-formed: matches the shape `reject_impossible_sdk_key` accepts (see
+// issue #134), so this fixture reaches the store instead of being refused
+// before it.
+const SDK_SECRET: &str = "sv_0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
 
 /// Seeds `store` with one project, one environment carrying its own
 /// metadata, one boolean flag whose metadata overrides one environment-level

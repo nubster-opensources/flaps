@@ -9,6 +9,7 @@ use flaps_store::SdkKeyScope;
 
 use crate::{
     error::ApiError,
+    preauth::{client_address::ClientAddress, sdk_key_shape::reject_impossible_sdk_key},
     state::{AppState, Store},
 };
 
@@ -75,6 +76,18 @@ impl<S: Store> FromRequestParts<AppState<S>> for SdkKeyPrincipal {
     ) -> Result<Self, Self::Rejection> {
         let raw_key =
             extract_bearer(parts).ok_or((StatusCode::UNAUTHORIZED, ApiError::Unauthorized))?;
+
+        // Refuse what cannot be a key before spending a query on it.
+        reject_impossible_sdk_key(&raw_key).map_err(|error| (StatusCode::UNAUTHORIZED, error))?;
+
+        // Budget the attempt on the material actually presented.
+        let client = ClientAddress::from_request_parts(parts, state)
+            .await
+            .unwrap_or(ClientAddress::Unknown);
+        state
+            .preauth_budget
+            .consume(client, &raw_key)
+            .map_err(|rejection| (StatusCode::TOO_MANY_REQUESTS, ApiError::from(rejection)))?;
 
         let record = state
             .store

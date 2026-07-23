@@ -198,3 +198,67 @@ async fn a_login_burst_does_not_starve_unrelated_requests() {
         let _ = task.await;
     }
 }
+
+#[tokio::test]
+async fn impossible_sdk_keys_never_reach_the_database() {
+    let hasher = KeyHasher::new(b"00000000000000000000000000000000".to_vec());
+    let store = SqliteStore::in_memory(hasher).await.expect("store");
+    let app = build_router(AppState::new(store.clone()));
+
+    let before = store.sdk_key_lookups();
+
+    for attempt in 0..50 {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/sdk/whoami")
+            .header("Authorization", format!("Bearer garbage-{attempt}"))
+            .body(Body::empty())
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    assert_eq!(
+        store.sdk_key_lookups(),
+        before,
+        "a flood of impossible credentials must not produce one query per request"
+    );
+}
+
+#[tokio::test]
+async fn impossible_and_absent_keys_look_the_same() {
+    // Any observable difference turns the status code into an oracle of key
+    // validity, which is exactly what an enumeration attack needs.
+    let app = make_app().await;
+
+    let impossible = whoami_status_and_body(&app, "garbage").await;
+    let absent = whoami_status_and_body(&app, &format!("sv_{}", "ab".repeat(24))).await;
+
+    assert_eq!(impossible.0, absent.0, "status codes must match");
+    assert_eq!(impossible.1, absent.1, "problem bodies must match");
+}
+
+/// Returns the status and the parsed problem body of a `GET /sdk/whoami`
+/// attempt carrying `key`.
+async fn whoami_status_and_body(app: &axum::Router, key: &str) -> (StatusCode, serde_json::Value) {
+    use http_body_util::BodyExt as _;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/sdk/whoami")
+        .header("Authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+
+    (status, parsed)
+}

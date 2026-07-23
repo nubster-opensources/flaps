@@ -266,11 +266,14 @@ mod tests {
             .await
             .unwrap();
 
-        let raw_key = "s-flapsd-config-integration-test-key";
+        // Well-formed: matches the shape `reject_impossible_sdk_key` accepts
+        // (see issue #134), so this fixture reaches the store instead of
+        // being refused before it.
+        let raw_key = format!("sv_{}", "0c".repeat(24));
         store
             .create_sdk_key(
                 "system",
-                raw_key,
+                &raw_key,
                 &NewSdkKey {
                     scope: SdkKeyScope {
                         project_key,
@@ -282,7 +285,7 @@ mod tests {
             .await
             .unwrap();
 
-        raw_key.to_owned()
+        raw_key
     }
 
     // -- build_app_state: rate_limit_per_minute --

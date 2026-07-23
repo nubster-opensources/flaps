@@ -31,7 +31,10 @@ const PROJECT: &str = "e2e-proj";
 const ENVIRONMENT: &str = "e2e-env";
 const FLAG: &str = "kill-switch-flag";
 const ADMIN_PASSWORD: &str = "admin-pass";
-const SDK_SECRET: &str = "s-e2e-kill-switch-server-0123456789";
+// Well-formed: matches the shape `reject_impossible_sdk_key` accepts (see
+// issue #134), so this fixture reaches the store instead of being refused
+// before it.
+const SDK_SECRET: &str = "sv_e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2";
 
 // ---------------------------------------------------------------------------
 // Harness

@@ -600,7 +600,11 @@ mod tests {
             .unwrap();
 
         // Seed an SDK key so the OFREP endpoint can authenticate.
-        let raw_key = "s-boot-integration-test-key-01234";
+        //
+        // Well-formed: matches the shape `reject_impossible_sdk_key` accepts
+        // (see issue #134), so this fixture reaches the store instead of
+        // being refused before it.
+        let raw_key = format!("sv_{}", "b0".repeat(24));
         let new_key = NewSdkKey {
             scope: SdkKeyScope {
                 project_key: project_key.clone(),
@@ -609,7 +613,7 @@ mod tests {
             kind: SdkKeyKind::Server,
         };
         store
-            .create_sdk_key("system", raw_key, &new_key)
+            .create_sdk_key("system", &raw_key, &new_key)
             .await
             .unwrap();
 

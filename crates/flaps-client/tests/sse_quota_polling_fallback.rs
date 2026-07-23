@@ -39,7 +39,10 @@ const PROJECT: &str = "polling-fallback-proj";
 const ENVIRONMENT: &str = "polling-fallback-env";
 const FLAG: &str = "polling-fallback-flag";
 const ADMIN_PASSWORD: &str = "admin-pass";
-const SDK_SECRET: &str = "s-polling-fallback-server-key-0123456789";
+// Well-formed: matches the shape `reject_impossible_sdk_key` accepts (see
+// issue #134), so this fixture reaches the store instead of being refused
+// before it.
+const SDK_SECRET: &str = "sv_5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
 
 /// A running Flaps server on a real ephemeral socket, seeded with a single
 /// boolean flag active in one environment, whose SSE concurrency quota is
@@ -71,10 +74,39 @@ async fn spawn_quota_exhausted_server() -> ServerHandle {
 
     // The permanently-exhausted SSE quota is the crux of the test: every
     // subscription attempt, from any key, is rejected with 429.
-    let state = AppState::new(store).with_sse_quota(Arc::new(SseQuota::new(SseQuotaConfig {
+    let mut state = AppState::new(store).with_sse_quota(Arc::new(SseQuota::new(SseQuotaConfig {
         max_global: 0,
         max_per_key: 0,
     })));
+
+    // This test's per-identity SDK budget is widened, on this server instance
+    // only, to isolate the property under test (a permanently SSE-rejected
+    // client still observes ruleset changes via polling) from the shared
+    // pre-authentication budget's default identity capacity (issue #134),
+    // which is sized for occasional login attempts, not this test's 50ms
+    // polling cadence plus its own SSE reconnect attempts on the same key.
+    // Whether SDK-key traffic should share that capacity at all is an open
+    // question for branch review (see task-8-brief.md, "Points a trancher",
+    // #2), not something this fallback-behavior test should arbitrate.
+    state.preauth_budget = Arc::new(flaps_server::preauth::budget::PreAuthBudget::new(
+        flaps_server::preauth::budget::PreAuthBudgetConfig {
+            global: flaps_server::rate_limit::RateLimitConfig {
+                enabled: true,
+                capacity: 10_000,
+                refill_per_second: 1_000.0,
+            },
+            per_client: flaps_server::rate_limit::RateLimitConfig {
+                enabled: true,
+                capacity: 10_000,
+                refill_per_second: 1_000.0,
+            },
+            per_identity: flaps_server::rate_limit::RateLimitConfig {
+                enabled: true,
+                capacity: 10_000,
+                refill_per_second: 1_000.0,
+            },
+        },
+    ));
 
     flaps_server::recompile::recompile_environment(&state, &project_key, &env_key)
         .await

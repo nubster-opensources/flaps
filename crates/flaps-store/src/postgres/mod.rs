@@ -1,6 +1,7 @@
 //! PostgreSQL backend: pool construction, migrations and repository implementations.
 
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
@@ -588,6 +589,7 @@ fn embedded_migrator() -> Migrator {
 pub struct PostgresStore {
     pool: Pool<Postgres>,
     hasher: KeyHasher,
+    sdk_key_lookups: Arc<AtomicU64>,
 }
 
 impl PostgresStore {
@@ -598,7 +600,20 @@ impl PostgresStore {
     pub async fn connect(url: &str, hasher: KeyHasher) -> StoreResult<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new().connect(url).await?;
         embedded_migrator().run(&pool).await?;
-        Ok(Self { pool, hasher })
+        Ok(Self {
+            pool,
+            hasher,
+            sdk_key_lookups: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Returns the cumulative number of SDK key lookups this store has served.
+    ///
+    /// Exposed as an operational counter: it is what proves a flood of
+    /// impossible credentials is refused before reaching the database.
+    #[must_use]
+    pub fn sdk_key_lookups(&self) -> u64 {
+        self.sdk_key_lookups.load(Ordering::Relaxed)
     }
 }
 
@@ -1124,6 +1139,8 @@ impl SdkKeyRepository for PostgresStore {
     }
 
     async fn find_sdk_key(&self, raw_key: &str) -> StoreResult<Option<SdkKeyRecord>> {
+        self.sdk_key_lookups.fetch_add(1, Ordering::Relaxed);
+
         let key_hash = self.hasher.hash(raw_key);
 
         let row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
