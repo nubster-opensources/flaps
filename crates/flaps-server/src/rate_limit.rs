@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::preauth::limiter_key::{LimiterKey, LimiterKeyDeriver};
+
 /// Configuration for the rate limiter.
 #[derive(Debug, Clone, Copy)]
 pub struct RateLimitConfig {
@@ -26,7 +28,13 @@ struct Bucket {
 /// `RateLimitConfig`: a sane default that avoids growing the public surface.
 const MAX_BUCKETS: usize = 100_000;
 
-/// In-memory token-bucket rate limiter keyed by an arbitrary string (e.g. SDK key prefix).
+/// In-memory token-bucket rate limiter keyed by an arbitrary string (e.g. SDK
+/// key prefix).
+///
+/// The caller-supplied string is never stored. It is derived, under a secret
+/// generated at process start, into a fixed-size [`LimiterKey`]: a bucket
+/// costs the same whatever the caller sent, and the table cannot be read back
+/// as a directory of attempted identifiers.
 ///
 /// When disabled (via [`RateLimiter::disabled`] or `enabled = false`), [`Self::check`]
 /// always returns `Ok(())`.
@@ -35,7 +43,8 @@ pub struct RateLimiter {
     capacity: f64,
     refill_per_second: f64,
     max_buckets: usize,
-    buckets: Mutex<HashMap<String, Bucket>>,
+    deriver: LimiterKeyDeriver,
+    buckets: Mutex<HashMap<LimiterKey, Bucket>>,
 }
 
 impl RateLimiter {
@@ -47,6 +56,7 @@ impl RateLimiter {
             capacity: f64::from(config.capacity),
             refill_per_second: config.refill_per_second,
             max_buckets: MAX_BUCKETS,
+            deriver: LimiterKeyDeriver::new(),
             buckets: Mutex::new(HashMap::new()),
         }
     }
@@ -82,6 +92,14 @@ impl RateLimiter {
             .len()
     }
 
+    /// Returns the number of key bytes stored per bucket, for test assertions.
+    ///
+    /// Constant by construction: the map is keyed by a fixed-size derived key.
+    #[cfg(test)]
+    pub fn stored_key_bytes(&self) -> usize {
+        std::mem::size_of::<LimiterKey>()
+    }
+
     /// Bounds the bucket map. First removes every bucket that has fully refilled
     /// (indistinguishable from a bucket that does not exist), then, if still
     /// above `max_buckets`, evicts the buckets closest to full (the least
@@ -90,7 +108,7 @@ impl RateLimiter {
     /// Reads token levels as of `now` without mutating surviving buckets: the
     /// normal refill on their next `check` already accounts for elapsed time,
     /// so mutating here would double-count it.
-    fn sweep(&self, buckets: &mut HashMap<String, Bucket>, now: Instant) {
+    fn sweep(&self, buckets: &mut HashMap<LimiterKey, Bucket>, now: Instant) {
         let capacity = self.capacity;
         let refill_per_second = self.refill_per_second;
         let tokens_now = |bucket: &Bucket| {
@@ -101,9 +119,9 @@ impl RateLimiter {
         buckets.retain(|_, bucket| tokens_now(bucket) < capacity);
 
         if buckets.len() > self.max_buckets {
-            let mut by_tokens: Vec<(String, f64)> = buckets
+            let mut by_tokens: Vec<(LimiterKey, f64)> = buckets
                 .iter()
-                .map(|(key, bucket)| (key.clone(), tokens_now(bucket)))
+                .map(|(key, bucket)| (*key, tokens_now(bucket)))
                 .collect();
             // Highest tokens_now first: those buckets are the least active
             // (closest to full) and are evicted first.
@@ -135,7 +153,8 @@ impl RateLimiter {
             .expect("rate limiter mutex should not be poisoned");
 
         let now = Instant::now();
-        let bucket = buckets.entry(key.to_owned()).or_insert_with(|| Bucket {
+        let key = self.deriver.derive(key);
+        let bucket = buckets.entry(key).or_insert_with(|| Bucket {
             tokens: self.capacity,
             last_refill: now,
         });
@@ -178,7 +197,8 @@ impl RateLimiter {
             .lock()
             .expect("rate limiter mutex should not be poisoned");
 
-        let bucket = buckets.entry(key.to_owned()).or_insert_with(|| Bucket {
+        let key = self.deriver.derive(key);
+        let bucket = buckets.entry(key).or_insert_with(|| Bucket {
             tokens: self.capacity,
             last_refill: now,
         });
@@ -274,5 +294,19 @@ mod tests {
         assert!(limiter.check_at("carol", t0).is_ok());
 
         assert_eq!(limiter.bucket_count(), 3);
+    }
+
+    #[test]
+    fn bucket_memory_does_not_grow_with_key_length() {
+        let limiter = RateLimiter::new(config(10, 1.0));
+        let long_key = "k".repeat(64 * 1024);
+
+        assert!(limiter.check(&long_key).is_ok());
+        assert_eq!(limiter.bucket_count(), 1);
+        assert_eq!(
+            limiter.stored_key_bytes(),
+            16,
+            "a bucket must cost a fixed number of key bytes whatever the caller sent"
+        );
     }
 }
