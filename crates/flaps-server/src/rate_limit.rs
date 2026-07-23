@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::preauth::limiter_key::{LimiterKey, LimiterKeyDeriver};
@@ -28,6 +29,24 @@ struct Bucket {
 /// `RateLimitConfig`: a sane default that avoids growing the public surface.
 const MAX_BUCKETS: usize = 100_000;
 
+/// Number of buckets sampled per eviction round.
+///
+/// Eviction picks the fullest bucket out of a small sample instead of sorting
+/// the whole table. The cost per round is constant, and eviction quality
+/// degrades gracefully rather than making the request path explode.
+const EVICTION_SAMPLE_SIZE: usize = 16;
+
+/// Computes the current token level of `bucket` as of `now`, without
+/// mutating it.
+///
+/// Always takes `now` as an explicit parameter rather than reading the wall
+/// clock: callers that need a deterministic, testable eviction cost depend on
+/// this value never drifting between two calls made at the same instant.
+fn tokens_at(bucket: &Bucket, now: Instant, capacity: f64, refill_per_second: f64) -> f64 {
+    let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+    (bucket.tokens + elapsed * refill_per_second).min(capacity)
+}
+
 /// In-memory token-bucket rate limiter keyed by an arbitrary string (e.g. SDK
 /// key prefix).
 ///
@@ -45,6 +64,8 @@ pub struct RateLimiter {
     max_buckets: usize,
     deriver: LimiterKeyDeriver,
     buckets: Mutex<HashMap<LimiterKey, Bucket>>,
+    /// Cumulative number of buckets inspected by eviction passes.
+    swept_bucket_scans: AtomicU64,
 }
 
 impl RateLimiter {
@@ -58,6 +79,7 @@ impl RateLimiter {
             max_buckets: MAX_BUCKETS,
             deriver: LimiterKeyDeriver::new(),
             buckets: Mutex::new(HashMap::new()),
+            swept_bucket_scans: AtomicU64::new(0),
         }
     }
 
@@ -100,38 +122,49 @@ impl RateLimiter {
         std::mem::size_of::<LimiterKey>()
     }
 
-    /// Bounds the bucket map. First removes every bucket that has fully refilled
-    /// (indistinguishable from a bucket that does not exist), then, if still
-    /// above `max_buckets`, evicts the buckets closest to full (the least
-    /// active ones) until back under the ceiling.
+    /// Bounds the bucket map. While still above `max_buckets`, evicts the
+    /// fullest bucket out of a bounded sample.
     ///
-    /// Reads token levels as of `now` without mutating surviving buckets: the
-    /// normal refill on their next `check` already accounts for elapsed time,
-    /// so mutating here would double-count it.
+    /// A bucket that has fully refilled sits at `self.capacity`, which is the
+    /// maximum value any bucket can reach: it therefore always wins the
+    /// fullest-of-sample comparison over an active bucket, so a fully
+    /// refilled bucket (indistinguishable from a bucket that does not exist)
+    /// already gets first priority for eviction without a dedicated
+    /// full-table pass.
+    ///
+    /// The sample-based round replaces both a full sort of the table and a
+    /// full-table retain: either one, run on every call, would itself scale
+    /// with the table size. Under a fast flood the table sits just above the
+    /// ceiling on nearly every request, so eviction runs on nearly every
+    /// request: its cost must not depend on the table size.
     fn sweep(&self, buckets: &mut HashMap<LimiterKey, Bucket>, now: Instant) {
-        let capacity = self.capacity;
-        let refill_per_second = self.refill_per_second;
-        let tokens_now = |bucket: &Bucket| {
-            let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
-            (bucket.tokens + elapsed * refill_per_second).min(capacity)
-        };
+        while buckets.len() > self.max_buckets {
+            let mut fullest: Option<(LimiterKey, f64)> = None;
+            let mut scanned = 0_u64;
 
-        buckets.retain(|_, bucket| tokens_now(bucket) < capacity);
+            for (key, bucket) in buckets.iter().take(EVICTION_SAMPLE_SIZE) {
+                scanned += 1;
+                let tokens = tokens_at(bucket, now, self.capacity, self.refill_per_second);
+                if fullest.is_none_or(|(_, best)| tokens > best) {
+                    fullest = Some((*key, tokens));
+                }
+            }
+            self.swept_bucket_scans
+                .fetch_add(scanned, Ordering::Relaxed);
 
-        if buckets.len() > self.max_buckets {
-            let mut by_tokens: Vec<(LimiterKey, f64)> = buckets
-                .iter()
-                .map(|(key, bucket)| (*key, tokens_now(bucket)))
-                .collect();
-            // Highest tokens_now first: those buckets are the least active
-            // (closest to full) and are evicted first.
-            by_tokens.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            let excess = buckets.len() - self.max_buckets;
-            for (key, _) in by_tokens.into_iter().take(excess) {
-                buckets.remove(&key);
+            match fullest {
+                Some((key, _)) => {
+                    buckets.remove(&key);
+                }
+                None => break,
             }
         }
+    }
+
+    /// Returns the cumulative number of buckets inspected by eviction passes.
+    #[cfg(test)]
+    pub fn swept_bucket_scans(&self) -> u64 {
+        self.swept_bucket_scans.load(Ordering::Relaxed)
     }
 
     /// Checks and consumes one token for `key`.
@@ -294,6 +327,28 @@ mod tests {
         assert!(limiter.check_at("carol", t0).is_ok());
 
         assert_eq!(limiter.bucket_count(), 3);
+    }
+
+    #[test]
+    fn eviction_work_per_request_is_bounded_whatever_the_table_size() {
+        let limiter = RateLimiter::with_max_buckets(config(10, 0.000_001), 64);
+        let t0 = Instant::now();
+
+        // Fill the table well past its ceiling with distinct, freshly debited
+        // keys: the refill rate is low enough that none of them is ever full,
+        // which is exactly the regime where the old sweep degenerated.
+        for index in 0..2_000 {
+            let _ = limiter.check_at(&format!("key-{index}"), t0);
+        }
+
+        let scans = limiter.swept_bucket_scans();
+        let requests = 2_000_u64;
+        assert!(
+            scans <= requests * 32,
+            "eviction must inspect a bounded number of buckets per request, \
+             not the whole table: {scans} scans for {requests} requests"
+        );
+        assert!(limiter.bucket_count() <= 64);
     }
 
     #[test]
