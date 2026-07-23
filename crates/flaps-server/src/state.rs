@@ -15,6 +15,7 @@ use flaps_store::repository::{
 };
 
 use crate::preauth::budget::{PreAuthBudget, PreAuthBudgetConfig};
+use crate::preauth::password_pool::PasswordVerificationPool;
 use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::sse_quota::{SseQuota, SseQuotaConfig};
 use crate::sync::SyncEvent;
@@ -155,6 +156,8 @@ pub struct AppState<S: Store> {
     /// layer alone and is kept for the account-level throttle it already
     /// provides.
     pub preauth_budget: Arc<PreAuthBudget>,
+    /// Concurrency ceiling on password verification (see issue #133).
+    pub password_pool: Arc<PasswordVerificationPool>,
     /// TTL for newly minted sessions.
     pub session_ttl: Duration,
     /// Broadcast channel sender for ruleset change notifications.
@@ -212,6 +215,7 @@ impl<S: Store> AppState<S> {
                     refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
                 },
             })),
+            password_pool: Arc::new(PasswordVerificationPool::new()),
             session_ttl: DEFAULT_SESSION_TTL,
             events,
             sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {
@@ -257,6 +261,7 @@ impl<S: Store> AppState<S> {
                     refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
                 },
             })),
+            password_pool: Arc::new(PasswordVerificationPool::new()),
             session_ttl,
             events,
             sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {

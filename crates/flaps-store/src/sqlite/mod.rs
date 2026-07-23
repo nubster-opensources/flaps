@@ -61,6 +61,21 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
+/// Verifies a password on a blocking thread.
+///
+/// Argon2 is CPU-bound by design. Called directly inside an `async fn` it runs
+/// on a runtime worker thread, so a burst of logins stalls unrelated requests.
+/// The decoy path goes through here too: leaving it synchronous would preserve
+/// the amplifier on precisely the branch an attacker without a valid account
+/// reaches.
+async fn verify_password_off_runtime(password: &str, hash: &str) -> bool {
+    let password = password.to_owned();
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .unwrap_or(false)
+}
+
 /// Fixed decoy argon2id hash, derived once at process start with the exact same
 /// `Argon2::default()` parameters as real account hashes.
 ///
@@ -1414,16 +1429,16 @@ impl AccountRepository for SqliteStore {
         let Some((id, uname, hash, is_active)) = row else {
             // Spend the same argon2 verification cost as a real account so that
             // enumeration cannot be inferred from response timing (best effort).
-            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
+            let _ = verify_password_off_runtime(password, &DUMMY_PASSWORD_HASH).await;
             return Ok(None);
         };
 
         if is_active == 0 {
-            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
+            let _ = verify_password_off_runtime(password, &DUMMY_PASSWORD_HASH).await;
             return Ok(None);
         }
 
-        if verify_password(password, &hash) {
+        if verify_password_off_runtime(password, &hash).await {
             Ok(Some(AccountRecord {
                 id,
                 username: uname,

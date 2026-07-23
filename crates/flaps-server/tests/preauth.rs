@@ -152,3 +152,49 @@ async fn a_throttled_login_advertises_a_retry_delay() {
         "the refusal must use the documented error format"
     );
 }
+
+#[tokio::test]
+async fn a_login_burst_does_not_starve_unrelated_requests() {
+    // The point of moving Argon2 off the runtime: a burst of logins must not
+    // freeze requests that have nothing to do with authentication.
+    let app = make_app().await;
+
+    let burst = (0..30).map(|attempt| {
+        let app = app.clone();
+        tokio::spawn(async move {
+            app.oneshot(login_request(
+                &format!("nobody-{attempt}"),
+                "wrong-password",
+            ))
+            .await
+        })
+    });
+
+    let unrelated = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri("/projects")
+                .body(Body::empty())
+                .expect("request");
+            app.oneshot(request).await
+        }
+    });
+
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), unrelated)
+        .await
+        .expect("an unrelated request must not be starved by a login burst")
+        .expect("join")
+        .expect("router response");
+
+    assert_eq!(
+        answered.status(),
+        StatusCode::UNAUTHORIZED,
+        "the unrelated request is answered on its own merits, not delayed by the burst"
+    );
+
+    for task in burst {
+        let _ = task.await;
+    }
+}

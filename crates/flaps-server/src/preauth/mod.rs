@@ -8,3 +8,4 @@ pub mod budget;
 pub mod client_address;
 pub mod limiter_key;
 pub mod limits;
+pub mod password_pool;

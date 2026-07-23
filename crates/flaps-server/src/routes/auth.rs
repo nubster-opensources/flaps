@@ -30,8 +30,9 @@ pub struct LoginResponse {
 /// `POST /login` - verify credentials and mint a session token.
 ///
 /// # Ordering
-/// Length bounds, then the layered pre-authentication budget, then the store,
-/// then password verification. Each step is cheaper than the one it guards.
+/// Length bounds, then the layered pre-authentication budget, then the login
+/// rate limiter, then the password verification concurrency ceiling, then the
+/// store. Each step is cheaper than the one it guards.
 ///
 /// # Errors
 /// - 422 unprocessable entity when a credential exceeds its accepted length.
@@ -56,6 +57,10 @@ pub async fn post_login<S: Store>(
         .map_err(|retry_after_seconds| ApiError::TooManyRequests {
             retry_after_seconds,
         })?;
+
+    // Bound the number of verifications in flight before paying for one.
+    let verification = state.password_pool.run(|| ()).await;
+    verification.map_err(ApiError::from)?;
 
     let account = state
         .store
