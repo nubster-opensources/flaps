@@ -41,30 +41,18 @@ impl PasswordVerificationPool {
         }
     }
 
-    /// Runs one verification on a blocking thread, if a permit is free.
+    /// Acquires a permit if one is free, without queueing.
     ///
     /// # Errors
-    /// Returns [`PreAuthRejection::GlobalBudgetExhausted`] rather than queueing
-    /// without bound when the pool is saturated. Refusing immediately keeps
-    /// latency bounded under attack; a queued request would immobilise exactly
-    /// the resource being exhausted.
-    pub async fn run<F, T>(&self, task: F) -> Result<T, PreAuthRejection>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        let permit = Arc::clone(&self.permits)
+    /// Returns [`PreAuthRejection::GlobalBudgetExhausted`] immediately when the
+    /// pool is saturated, rather than queueing without bound: a queued request
+    /// would immobilise exactly the resource being exhausted. Hold the returned
+    /// guard across the whole verification; dropping it frees the permit.
+    pub fn try_acquire(&self) -> Result<PasswordVerificationPermit, PreAuthRejection> {
+        Arc::clone(&self.permits)
             .try_acquire_owned()
-            .map_err(|_| PreAuthRejection::GlobalBudgetExhausted)?;
-
-        let outcome = tokio::task::spawn_blocking(move || {
-            let value = task();
-            drop(permit);
-            value
-        })
-        .await;
-
-        outcome.map_err(|_| PreAuthRejection::GlobalBudgetExhausted)
+            .map(|permit| PasswordVerificationPermit { _permit: permit })
+            .map_err(|_| PreAuthRejection::GlobalBudgetExhausted)
     }
 }
 
@@ -74,74 +62,59 @@ impl Default for PasswordVerificationPool {
     }
 }
 
+/// A held permit bounding one in-flight password verification.
+///
+/// Keep this guard alive for the entire verification (the store's SQL lookup
+/// plus its off-runtime Argon2 computation). Dropping it releases the permit.
+/// Bounding the number of live guards is what caps how many Argon2
+/// computations run at once, independently of Tokio's blocking pool.
+pub struct PasswordVerificationPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[tokio::test]
-    async fn a_task_within_capacity_runs_and_returns_its_value() {
+    #[test]
+    fn a_task_within_capacity_acquires_a_permit() {
         let pool = PasswordVerificationPool::with_capacity(2);
-        assert_eq!(pool.run(|| 42).await, Ok(42));
+        assert!(pool.try_acquire().is_ok());
     }
 
-    #[tokio::test]
-    async fn saturation_refuses_instead_of_queueing() {
-        let pool = Arc::new(PasswordVerificationPool::with_capacity(1));
-        let release = Arc::new(tokio::sync::Notify::new());
-        let started = Arc::new(tokio::sync::Notify::new());
+    #[test]
+    fn saturation_refuses_until_the_held_guard_drops() {
+        let pool = PasswordVerificationPool::with_capacity(1);
 
-        let occupant = {
-            let pool = Arc::clone(&pool);
-            let release = Arc::clone(&release);
-            let started = Arc::clone(&started);
-            tokio::spawn(async move {
-                pool.run(move || {
-                    started.notify_one();
-                    // Block the single permit until the test releases it.
-                    futures_executor_block_on_notified(&release);
-                })
-                .await
-            })
-        };
-
-        started.notified().await;
+        let occupant = pool
+            .try_acquire()
+            .expect("first acquire succeeds within capacity");
 
         assert_eq!(
-            pool.run(|| ()).await,
+            pool.try_acquire().map(|_| ()),
             Err(PreAuthRejection::GlobalBudgetExhausted),
             "a saturated pool must refuse immediately: a waiting request holds \
              exactly the resource the attacker is trying to exhaust"
         );
 
-        release.notify_one();
-        occupant
-            .await
-            .expect("occupant task")
-            .expect("occupant run");
+        drop(occupant);
+
+        assert!(
+            pool.try_acquire().is_ok(),
+            "dropping the guard must release the permit"
+        );
     }
 
-    #[tokio::test]
-    async fn a_permit_is_released_when_the_task_ends() {
-        let pool = PasswordVerificationPool::with_capacity(1);
-        let calls = Arc::new(AtomicUsize::new(0));
+    #[test]
+    fn a_permit_is_released_when_the_guard_is_dropped_across_a_loop() {
+        let capacity = 3;
+        let pool = PasswordVerificationPool::with_capacity(capacity);
 
-        for _ in 0..5 {
-            let calls = Arc::clone(&calls);
-            pool.run(move || calls.fetch_add(1, Ordering::Relaxed))
-                .await
-                .expect("sequential runs stay within capacity");
+        for _ in 0..(capacity * 5) {
+            let permit = pool
+                .try_acquire()
+                .expect("previous guard was dropped, so capacity is free again");
+            drop(permit);
         }
-
-        assert_eq!(calls.load(Ordering::Relaxed), 5);
-    }
-
-    /// Blocks the current blocking thread until `notify` fires.
-    fn futures_executor_block_on_notified(notify: &tokio::sync::Notify) {
-        #[allow(clippy::expect_used)]
-        let handle =
-            tokio::runtime::Handle::try_current().expect("test runs inside a tokio runtime");
-        handle.block_on(notify.notified());
     }
 }

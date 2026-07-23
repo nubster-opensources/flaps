@@ -58,9 +58,9 @@ pub async fn post_login<S: Store>(
             retry_after_seconds,
         })?;
 
-    // Bound the number of verifications in flight before paying for one.
-    let verification = state.password_pool.run(|| ()).await;
-    verification.map_err(ApiError::from)?;
+    // Hold the permit across the entire verification so the number of Argon2
+    // computations in flight is bounded by the pool, not by Tokio's blocking pool.
+    let _verification_permit = state.password_pool.try_acquire().map_err(ApiError::from)?;
 
     let account = state
         .store
