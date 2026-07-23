@@ -91,4 +91,35 @@ mod tests {
             ClientAddress::from(second).bucket_key()
         );
     }
+
+    #[tokio::test]
+    async fn the_extractor_reports_the_connection_address_when_present() {
+        use axum::extract::FromRequestParts;
+
+        let socket_address: SocketAddr = "203.0.113.7:40000".parse().expect("socket address");
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        parts.extensions.insert(ConnectInfo(socket_address));
+
+        let extracted = ClientAddress::from_request_parts(&mut parts, &())
+            .await
+            .expect("the extractor is infallible");
+
+        assert_eq!(
+            extracted,
+            ClientAddress::Known(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_extractor_falls_back_to_unknown_when_no_connection_address_is_recorded() {
+        use axum::extract::FromRequestParts;
+
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+
+        let extracted = ClientAddress::from_request_parts(&mut parts, &())
+            .await
+            .expect("the extractor is infallible");
+
+        assert_eq!(extracted, ClientAddress::Unknown);
+    }
 }
