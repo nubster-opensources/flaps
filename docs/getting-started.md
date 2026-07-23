@@ -154,3 +154,88 @@ production deployments must supply a long random secret of their own.
 
 On first start `flapsd` prints the generated admin credentials once. Use them
 with the admin API as shown above.
+
+## Pre-authentication limits
+
+Everything in this section applies before a request is authenticated: on
+`POST /login`, and on the bearer-key check that guards every SDK route.
+
+### Length bounds (not configurable)
+
+| Field | Bound |
+|-------|-------|
+| Username | 256 bytes |
+| Password | 1024 bytes |
+| Login request body | 4096 bytes (4 KiB) |
+
+These bounds are fixed in the binary; there is no `flapsd.toml` key or other
+configuration surface that raises them. A security bound an operator can
+raise without measuring the consequence is not a bound.
+
+A login request body over 4096 bytes is rejected with `413 Payload Too Large`
+by the route's body limit, before the JSON is even parsed. A username or
+password within an otherwise valid body but over its own bound is rejected
+with `422 Unprocessable Entity`, before the pre-authentication budget below is
+consulted, before any store access, and before Argon2 runs.
+
+### Layered pre-authentication budget
+
+`POST /login` is guarded by three independent token-bucket layers, consulted
+in a fixed order from widest to narrowest: global, then per connection
+address, then per identity (the submitted username, shared with the
+pre-existing per-account throttle). Saturation at any layer is refused
+immediately with `429 Too Many Requests` and a `Retry-After` header; nothing
+is ever queued.
+
+| Layer | Default capacity | Default refill |
+|-------|-------------------|-----------------|
+| Global | 120 | 20 per second |
+| Per connection address | 20 | 1 per second |
+| Per identity | 5 | 1 per 10 seconds |
+
+The layers exist to close a rotation gap: rotating usernames buys a fresh
+per-identity bucket on every attempt, but every attempt still draws on the
+same global and per-address buckets, so rotation stops paying off once those
+wider layers are the ones that answer.
+
+### Behind a reverse proxy
+
+The per-address layer reads the TCP connection address alone. It never reads
+a client-supplied header, `X-Forwarded-For` included: trusting such a header
+would let an attacker steer their own requests into whichever bucket they
+choose, which is worse than having no per-address layer at all.
+
+Behind a reverse proxy or load balancer, every request therefore arrives from
+the proxy's own address, so the per-address layer degenerates into a second
+global layer: it stops discriminating between clients, though it keeps
+discriminating between requests, and it never disables the global layer
+underneath it. This is an accepted loss of granularity, not a vulnerability.
+An operator who needs per-client granularity behind a proxy must enforce it
+at the proxy itself, on infrastructure that can actually trust the header.
+
+### The SDK key path
+
+A bearer credential on an SDK route is checked for shape before anything
+else: an accepted key is exactly 51 bytes, the prefix `sv_` (server) or `cl_`
+(client) followed by 48 lowercase hexadecimal characters. A credential that
+cannot match this shape is refused immediately, before any database lookup
+and before any budget layer is consulted.
+
+For a well-formed credential, only a FAILED lookup (a key that parses but
+does not exist in the store) draws on the wide layers of the
+pre-authentication budget (global and per-address; the per-identity layer is
+never consulted on this path, since the presented key is exactly what an
+attacker rotates). A valid key never draws on this budget at all: it is not
+throttled by it, and stays governed only by the ordinary per-key SDK rate
+limiter (60 requests per minute by default). A flood of well-formed but
+nonexistent keys stops reaching the database once the global or per-address
+layer is exhausted; a flood of malformed keys never reaches the database in
+the first place.
+
+An impossible key (fails the shape check) and an absent key (well-formed but
+unknown to the store) return the identical `401 Unauthorized` problem+json
+body: the status code and body never let a caller distinguish "this key
+cannot exist" from "this key does not exist". Once the wide budget layers are
+exhausted, a request is refused earlier still, before the lookup, with
+`429 Too Many Requests`: ordinary rate limiting, triggered by volume from the
+same address or global bucket, not a new oracle on key shape.
