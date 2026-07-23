@@ -92,3 +92,63 @@ async fn a_normal_login_still_succeeds() {
 
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn rotating_usernames_are_throttled_at_the_login_route() {
+    // Without the address layer, each fresh username starts with a full
+    // bucket and this flood never meets any resistance.
+    let app = make_app().await;
+    let mut statuses = Vec::new();
+
+    for attempt in 0..64 {
+        let response = app
+            .clone()
+            .oneshot(login_request(
+                &format!("nobody-{attempt}"),
+                "wrong-password",
+            ))
+            .await
+            .expect("router response");
+        statuses.push(response.status());
+    }
+
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "a flood of rotating usernames must be throttled, got {statuses:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_throttled_login_advertises_a_retry_delay() {
+    let app = make_app().await;
+
+    let mut throttled = None;
+    for attempt in 0..64 {
+        let response = app
+            .clone()
+            .oneshot(login_request(
+                &format!("nobody-{attempt}"),
+                "wrong-password",
+            ))
+            .await
+            .expect("router response");
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            throttled = Some(response);
+            break;
+        }
+    }
+
+    let response = throttled.expect("the flood must eventually be throttled");
+    assert!(
+        response.headers().contains_key("retry-after"),
+        "a refusal must tell the caller when to come back"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/problem+json"),
+        "the refusal must use the documented error format"
+    );
+}

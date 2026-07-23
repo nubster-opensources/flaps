@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::ApiError,
-    preauth::limits::validate_credential_lengths,
+    preauth::{client_address::ClientAddress, limits::validate_credential_lengths},
     state::{AppState, Store},
 };
 
@@ -29,21 +29,27 @@ pub struct LoginResponse {
 
 /// `POST /login` - verify credentials and mint a session token.
 ///
+/// # Ordering
+/// Length bounds, then the layered pre-authentication budget, then the store,
+/// then password verification. Each step is cheaper than the one it guards.
+///
 /// # Errors
-/// - 422 unprocessable entity when a credential exceeds
-///   [`MAX_USERNAME_BYTES`](crate::preauth::limits::MAX_USERNAME_BYTES) or
-///   [`MAX_PASSWORD_BYTES`](crate::preauth::limits::MAX_PASSWORD_BYTES).
-/// - 429 too many requests (`Retry-After` header), throttled per username via
-///   [`AppState::login_rate_limiter`], before credentials are even checked.
+/// - 422 unprocessable entity when a credential exceeds its accepted length.
+/// - 429 too many requests (`Retry-After` header) when the pre-authentication
+///   budget is exhausted, before any store access.
+/// - 401 unauthorized when the credentials do not match.
 pub async fn post_login<S: Store>(
     State(state): State<AppState<S>>,
+    client: ClientAddress,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     // Bound what the caller sent before anything allocates on its behalf.
     validate_credential_lengths(&body.username, &body.password)?;
 
-    // Rate limit keyed by username, ahead of any store access: caps the rate
-    // of brute-force attempts against a single account.
+    // Layered budget: the widest layer refuses first and costs the least.
+    state.preauth_budget.consume(client, &body.username)?;
+
+    // Per-account throttle, kept for the brute-force cap it already provides.
     state
         .login_rate_limiter
         .check(&body.username)

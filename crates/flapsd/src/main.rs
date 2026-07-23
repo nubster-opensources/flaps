@@ -178,13 +178,19 @@ async fn boot<S: flaps_server::state::Store>(
 
     tracing::info!(%bind_addr, "flapsd listening");
 
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("received shutdown signal; draining connections");
-        })
-        .await
-        .context("HTTP server error")?;
+    // `into_make_service_with_connect_info` is what makes the connection
+    // address reachable by the per-address budget layer. Without it every
+    // request degrades to `ClientAddress::Unknown` and shares one bucket.
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("received shutdown signal; draining connections");
+    })
+    .await
+    .context("HTTP server error")?;
 
     Ok(())
 }
@@ -461,6 +467,50 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "session minted with a 2-second TTL must be expired after 2.2 seconds"
         );
+    }
+
+    // -- boot: connection information --
+
+    /// Proves the daemon serves the router with connection information
+    /// attached: the per-address pre-authentication layer is inert without it,
+    /// and nothing else in the test suite would notice its absence.
+    #[tokio::test]
+    async fn the_daemon_serves_the_router_with_connection_information() {
+        use std::net::SocketAddr;
+
+        let store = make_store().await;
+        flaps_server::bootstrap_admin(&store, "admin", "admin-password")
+            .await
+            .expect("bootstrap admin");
+        let config = base_config(None, None);
+        let state = build_app_state(store, &config);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("ephemeral listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let body = serde_json::json!({ "username": "admin", "password": "wrong" });
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}/login"))
+            .json(&body)
+            .send()
+            .await
+            .expect("login response");
+
+        assert_eq!(
+            response.status().as_u16(),
+            401,
+            "the served router must answer over a real socket"
+        );
+        server.abort();
     }
 
     // -- log_effective_config --

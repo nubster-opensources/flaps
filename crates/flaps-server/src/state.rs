@@ -14,7 +14,8 @@ use flaps_store::repository::{
     TransactionalStore,
 };
 
-use crate::rate_limit::RateLimiter;
+use crate::preauth::budget::{PreAuthBudget, PreAuthBudgetConfig};
+use crate::rate_limit::{RateLimitConfig, RateLimiter};
 use crate::sse_quota::{SseQuota, SseQuotaConfig};
 use crate::sync::SyncEvent;
 
@@ -83,6 +84,23 @@ pub const DEFAULT_LOGIN_RATE_LIMIT_CAPACITY: u32 = 5;
 /// (~1 attempt every 10 seconds).
 pub const DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND: f64 = 0.1;
 
+/// Default process-wide burst capacity for unauthenticated attempts.
+///
+/// Sized well above any plausible legitimate login burst on a single daemon,
+/// and far below what it takes to saturate password verification.
+pub const DEFAULT_PREAUTH_GLOBAL_CAPACITY: u32 = 120;
+
+/// Default refill rate of the process-wide pre-authentication budget, in
+/// attempts per second.
+pub const DEFAULT_PREAUTH_GLOBAL_REFILL_PER_SECOND: f64 = 20.0;
+
+/// Default burst capacity of the per-connection-address budget.
+pub const DEFAULT_PREAUTH_PER_CLIENT_CAPACITY: u32 = 20;
+
+/// Default refill rate of the per-connection-address budget, in attempts per
+/// second.
+pub const DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND: f64 = 1.0;
+
 /// Broadcast channel capacity for [`SyncEvent`] notifications.
 ///
 /// A buffer of 256 events covers typical mutation bursts. Slower subscribers
@@ -130,6 +148,13 @@ pub struct AppState<S: Store> {
     /// throttle here reduces the value of brute-forcing a single account's
     /// password without affecting the SDK read-path budget.
     pub login_rate_limiter: Arc<RateLimiter>,
+    /// Layered budget guarding unauthenticated entry points (see issues #133
+    /// and #134).
+    ///
+    /// Distinct from [`Self::login_rate_limiter`], which is the per-identity
+    /// layer alone and is kept for the account-level throttle it already
+    /// provides.
+    pub preauth_budget: Arc<PreAuthBudget>,
     /// TTL for newly minted sessions.
     pub session_ttl: Duration,
     /// Broadcast channel sender for ruleset change notifications.
@@ -170,6 +195,23 @@ impl<S: Store> AppState<S> {
                 capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
                 refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
             })),
+            preauth_budget: Arc::new(PreAuthBudget::new(PreAuthBudgetConfig {
+                global: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_PREAUTH_GLOBAL_CAPACITY,
+                    refill_per_second: DEFAULT_PREAUTH_GLOBAL_REFILL_PER_SECOND,
+                },
+                per_client: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_PREAUTH_PER_CLIENT_CAPACITY,
+                    refill_per_second: DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND,
+                },
+                per_identity: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
+                    refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
+                },
+            })),
             session_ttl: DEFAULT_SESSION_TTL,
             events,
             sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {
@@ -198,6 +240,23 @@ impl<S: Store> AppState<S> {
             cache: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter,
             login_rate_limiter,
+            preauth_budget: Arc::new(PreAuthBudget::new(PreAuthBudgetConfig {
+                global: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_PREAUTH_GLOBAL_CAPACITY,
+                    refill_per_second: DEFAULT_PREAUTH_GLOBAL_REFILL_PER_SECOND,
+                },
+                per_client: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_PREAUTH_PER_CLIENT_CAPACITY,
+                    refill_per_second: DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND,
+                },
+                per_identity: RateLimitConfig {
+                    enabled: true,
+                    capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
+                    refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
+                },
+            })),
             session_ttl,
             events,
             sse_quota: Arc::new(SseQuota::new(SseQuotaConfig {
