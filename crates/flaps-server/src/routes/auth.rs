@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::ApiError,
+    preauth::limits::validate_credential_lengths,
     state::{AppState, Store},
 };
 
@@ -29,12 +30,18 @@ pub struct LoginResponse {
 /// `POST /login` - verify credentials and mint a session token.
 ///
 /// # Errors
+/// - 422 unprocessable entity when a credential exceeds
+///   [`MAX_USERNAME_BYTES`](crate::preauth::limits::MAX_USERNAME_BYTES) or
+///   [`MAX_PASSWORD_BYTES`](crate::preauth::limits::MAX_PASSWORD_BYTES).
 /// - 429 too many requests (`Retry-After` header), throttled per username via
 ///   [`AppState::login_rate_limiter`], before credentials are even checked.
 pub async fn post_login<S: Store>(
     State(state): State<AppState<S>>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    // Bound what the caller sent before anything allocates on its behalf.
+    validate_credential_lengths(&body.username, &body.password)?;
+
     // Rate limit keyed by username, ahead of any store access: caps the rate
     // of brute-force attempts against a single account.
     state

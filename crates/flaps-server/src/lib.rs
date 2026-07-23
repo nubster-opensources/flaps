@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod error;
 pub mod etag;
+pub mod preauth;
 pub mod rate_limit;
 pub mod recompile;
 pub mod routes;
@@ -15,6 +16,7 @@ pub mod sync;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
 };
 
@@ -41,7 +43,12 @@ use sync::{get_events, get_ruleset};
 pub fn build_router<S: Store>(state: AppState<S>) -> Router {
     Router::<AppState<S>>::new()
         // ---- Public ----
-        .route("/login", post(post_login::<S>))
+        .route(
+            "/login",
+            post(post_login::<S>).layer(DefaultBodyLimit::max(
+                crate::preauth::limits::MAX_LOGIN_BODY_BYTES,
+            )),
+        )
         // ---- Admin: CRUD (projects, environments, flags, segments, configs) ----
         .route("/projects", get(list_projects::<S>))
         .route("/projects/{project}", get(get_project::<S>))
