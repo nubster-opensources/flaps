@@ -77,34 +77,38 @@ impl<S: Store> FromRequestParts<AppState<S>> for SdkKeyPrincipal {
         let raw_key =
             extract_bearer(parts).ok_or((StatusCode::UNAUTHORIZED, ApiError::Unauthorized))?;
 
-        // Refuse what cannot be a key before spending a query on it.
-        reject_impossible_sdk_key(&raw_key).map_err(|error| (StatusCode::UNAUTHORIZED, error))?;
+        // Mal-formed keys are refused for free, before any budget or lookup.
+        reject_impossible_sdk_key(&raw_key).map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
 
-        // Budget the attempt on the material actually presented.
+        // Short-circuit before the lookup if this client has already spent its
+        // failure budget. Peek only, so a valid key here never consumes anything.
         let client = ClientAddress::from_request_parts(parts, state)
             .await
-            .unwrap_or(ClientAddress::Unknown);
+            .unwrap_or(ClientAddress::Unknown); // Infallible
         state
             .preauth_budget
-            .consume(client, &raw_key)
-            .map_err(|rejection| (StatusCode::TOO_MANY_REQUESTS, ApiError::from(rejection)))?;
+            .sdk_admits(client)
+            .map_err(|r| (StatusCode::TOO_MANY_REQUESTS, ApiError::from(r)))?;
 
-        let record = state
-            .store
-            .find_sdk_key(&raw_key)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiError::Internal(e.to_string()),
-                )
-            })?
-            .ok_or((StatusCode::UNAUTHORIZED, ApiError::Unauthorized))?;
+        let record = state.store.find_sdk_key(&raw_key).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::Internal(e.to_string()),
+            )
+        })?;
 
-        Ok(SdkKeyPrincipal {
-            scope: record.scope,
-            kind: record.kind,
-            prefix: record.prefix,
-        })
+        if let Some(record) = record {
+            Ok(SdkKeyPrincipal {
+                scope: record.scope,
+                kind: record.kind,
+                prefix: record.prefix,
+            })
+        } else {
+            // Only a FAILED lookup spends the budget: this is what bounds a
+            // flood of well-formed but absent keys without ever touching
+            // valid traffic.
+            let _ = state.preauth_budget.consume_sdk_failure(client);
+            Err((StatusCode::UNAUTHORIZED, ApiError::Unauthorized))
+        }
     }
 }

@@ -92,6 +92,40 @@ impl PreAuthBudget {
             .map_err(|_| PreAuthRejection::IdentityBudgetExhausted)?;
         Ok(())
     }
+
+    /// Checks, without consuming, whether the wide layers (global and
+    /// per-client) still admit an attempt from `client`. The per-identity
+    /// layer is NOT consulted: on the SDK path the identity is the presented
+    /// key, which an attacker rotates, so only the wide layers meaningfully
+    /// bound a flood.
+    ///
+    /// # Errors
+    /// Returns the widest exhausted layer.
+    pub fn sdk_admits(&self, client: ClientAddress) -> Result<(), PreAuthRejection> {
+        if !self.global.has_capacity(GLOBAL_BUCKET_KEY) {
+            return Err(PreAuthRejection::GlobalBudgetExhausted);
+        }
+        if !self.per_client.has_capacity(&client.bucket_key()) {
+            return Err(PreAuthRejection::ClientBudgetExhausted);
+        }
+        Ok(())
+    }
+
+    /// Consumes one attempt from the wide layers (global then per-client)
+    /// after a FAILED SDK key lookup. Valid keys never reach this call, so
+    /// legitimate SDK traffic never touches the budget.
+    ///
+    /// # Errors
+    /// Returns the widest layer that was already exhausted at consume time.
+    pub fn consume_sdk_failure(&self, client: ClientAddress) -> Result<(), PreAuthRejection> {
+        self.global
+            .check(GLOBAL_BUCKET_KEY)
+            .map_err(|_| PreAuthRejection::GlobalBudgetExhausted)?;
+        self.per_client
+            .check(&client.bucket_key())
+            .map_err(|_| PreAuthRejection::ClientBudgetExhausted)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +229,50 @@ mod tests {
             Err(PreAuthRejection::ClientBudgetExhausted),
             "an absent address degrades the layer, it never disables it"
         );
+    }
+
+    #[test]
+    fn sdk_admits_is_ok_within_budget_and_err_once_the_client_layer_is_drained() {
+        let budget = PreAuthBudget::new(config(1_000, 3, 1_000));
+
+        assert!(budget.sdk_admits(address(1)).is_ok());
+
+        for attempt in 0..3 {
+            assert!(
+                budget.consume_sdk_failure(address(1)).is_ok(),
+                "attempt {attempt} is within the per-client budget"
+            );
+        }
+
+        assert_eq!(
+            budget.sdk_admits(address(1)),
+            Err(PreAuthRejection::ClientBudgetExhausted),
+            "the per-client layer must be reported exhausted by the peek, without a further consume"
+        );
+    }
+
+    #[test]
+    fn consume_sdk_failure_never_touches_the_per_identity_layer() {
+        let budget = PreAuthBudget::new(config(1_000, 2, 1));
+
+        // Drain the per-client layer to zero via the SDK-failure path, on the
+        // same address the login-shaped consume below will use.
+        for attempt in 0..2 {
+            assert!(
+                budget.consume_sdk_failure(address(1)).is_ok(),
+                "attempt {attempt} is within the per-client budget"
+            );
+        }
+        assert_eq!(
+            budget.sdk_admits(address(1)),
+            Err(PreAuthRejection::ClientBudgetExhausted),
+            "the per-client layer must now be exhausted"
+        );
+
+        // A login-shaped consume on a fresh client address, but the same
+        // identity, still has its own untouched per-identity capacity: the
+        // SDK-failure path above never consulted the per-identity layer.
+        assert!(budget.consume(address(2), "alice").is_ok());
     }
 
     #[test]

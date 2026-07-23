@@ -74,39 +74,15 @@ async fn spawn_quota_exhausted_server() -> ServerHandle {
 
     // The permanently-exhausted SSE quota is the crux of the test: every
     // subscription attempt, from any key, is rejected with 429.
-    let mut state = AppState::new(store).with_sse_quota(Arc::new(SseQuota::new(SseQuotaConfig {
+    let state = AppState::new(store).with_sse_quota(Arc::new(SseQuota::new(SseQuotaConfig {
         max_global: 0,
         max_per_key: 0,
     })));
 
-    // This test's per-identity SDK budget is widened, on this server instance
-    // only, to isolate the property under test (a permanently SSE-rejected
-    // client still observes ruleset changes via polling) from the shared
-    // pre-authentication budget's default identity capacity (issue #134),
-    // which is sized for occasional login attempts, not this test's 50ms
-    // polling cadence plus its own SSE reconnect attempts on the same key.
-    // Whether SDK-key traffic should share that capacity at all is an open
-    // question for branch review (see task-8-brief.md, "Points a trancher",
-    // #2), not something this fallback-behavior test should arbitrate.
-    state.preauth_budget = Arc::new(flaps_server::preauth::budget::PreAuthBudget::new(
-        flaps_server::preauth::budget::PreAuthBudgetConfig {
-            global: flaps_server::rate_limit::RateLimitConfig {
-                enabled: true,
-                capacity: 10_000,
-                refill_per_second: 1_000.0,
-            },
-            per_client: flaps_server::rate_limit::RateLimitConfig {
-                enabled: true,
-                capacity: 10_000,
-                refill_per_second: 1_000.0,
-            },
-            per_identity: flaps_server::rate_limit::RateLimitConfig {
-                enabled: true,
-                capacity: 10_000,
-                refill_per_second: 1_000.0,
-            },
-        },
-    ));
+    // The default pre-authentication budget is used here (see issue #134
+    // Option A): a valid SDK key never consumes it, since it is only spent on
+    // a FAILED key lookup, so this test's own SSE reconnect attempts and
+    // 50ms polling cadence on the same valid key never touch it.
 
     flaps_server::recompile::recompile_environment(&state, &project_key, &env_key)
         .await

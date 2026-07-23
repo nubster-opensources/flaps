@@ -214,6 +214,67 @@ impl RateLimiter {
         result
     }
 
+    /// Reports whether a token is currently available for `key`, WITHOUT
+    /// consuming it.
+    ///
+    /// Used to short-circuit before an expensive operation when the budget is
+    /// already exhausted. As a peek it never mutates a bucket; a concurrent
+    /// consume may still race, so the bound it enforces is approximate, which
+    /// is acceptable for an admission short-circuit.
+    #[must_use]
+    pub fn has_capacity(&self, key: &str) -> bool {
+        if !self.enabled {
+            return true;
+        }
+
+        #[allow(clippy::expect_used)]
+        let buckets = self
+            .buckets
+            .lock()
+            .expect("rate limiter mutex should not be poisoned");
+
+        let derived = self.deriver.derive(key);
+        match buckets.get(&derived) {
+            // A never-seen key is a full, untouched bucket.
+            None => true,
+            Some(bucket) => {
+                let tokens = tokens_at(
+                    bucket,
+                    Instant::now(),
+                    self.capacity,
+                    self.refill_per_second,
+                );
+                tokens >= 1.0
+            }
+        }
+    }
+
+    /// Peeks capacity using an injectable `now` instant (for deterministic
+    /// tests). Mirrors [`Self::check_at`]; see [`Self::has_capacity`] for the
+    /// non-test entry point.
+    #[cfg(test)]
+    #[must_use]
+    pub fn has_capacity_at(&self, key: &str, now: Instant) -> bool {
+        if !self.enabled {
+            return true;
+        }
+
+        #[allow(clippy::expect_used)]
+        let buckets = self
+            .buckets
+            .lock()
+            .expect("rate limiter mutex should not be poisoned");
+
+        let derived = self.deriver.derive(key);
+        match buckets.get(&derived) {
+            None => true,
+            Some(bucket) => {
+                let tokens = tokens_at(bucket, now, self.capacity, self.refill_per_second);
+                tokens >= 1.0
+            }
+        }
+    }
+
     /// Checks using an injectable `now` instant (for deterministic tests).
     ///
     /// This is a test-only helper exposed here so that unit tests do not need
@@ -349,6 +410,49 @@ mod tests {
              not the whole table: {scans} scans for {requests} requests"
         );
         assert!(limiter.bucket_count() <= 64);
+    }
+
+    #[test]
+    fn a_fresh_key_has_capacity() {
+        let limiter = RateLimiter::with_max_buckets(config(3, 1.0), 10);
+        let t0 = Instant::now();
+
+        assert!(limiter.has_capacity_at("alice", t0));
+    }
+
+    #[test]
+    fn a_drained_key_reports_no_capacity_without_a_further_consume() {
+        let limiter = RateLimiter::with_max_buckets(config(3, 0.000_001), 10);
+        let t0 = Instant::now();
+
+        for _ in 0..3 {
+            assert!(limiter.check_at("alice", t0).is_ok());
+        }
+
+        assert!(
+            !limiter.has_capacity_at("alice", t0),
+            "a bucket drained to zero must report no capacity"
+        );
+        // The peek itself must not have consumed anything: repeating it
+        // changes nothing.
+        assert!(!limiter.has_capacity_at("alice", t0));
+    }
+
+    #[test]
+    fn has_capacity_never_consumes_a_token() {
+        let limiter = RateLimiter::with_max_buckets(config(3, 0.000_001), 10);
+        let t0 = Instant::now();
+
+        // Peek many times: none of these may spend a token.
+        for _ in 0..10 {
+            assert!(limiter.has_capacity_at("alice", t0));
+        }
+
+        // The bucket must still have its full capacity to give out.
+        for _ in 0..3 {
+            assert!(limiter.check_at("alice", t0).is_ok());
+        }
+        assert!(limiter.check_at("alice", t0).is_err());
     }
 
     #[test]

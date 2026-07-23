@@ -711,10 +711,7 @@ async fn bulk_mixed_success_and_disabled() {
 ///
 /// We spawn a task that repeatedly swaps the cache while another task fires
 /// bulk evaluation requests. Every response must be 200 with a valid `flags`
-/// array, 304, or 401: the last one only once the per-identity
-/// pre-authentication budget (issue #134) saturates under this tight
-/// same-key burst, a case the OFREP routes fold into the same unauthorized
-/// response as an unknown key. No panics or 500s are acceptable.
+/// array, or 304. No panics or 500s are acceptable.
 #[tokio::test]
 async fn bulk_atomicity_concurrent_cache_swap() {
     use flaps_server::recompile::install_in_cache;
@@ -751,9 +748,7 @@ async fn bulk_atomicity_concurrent_cache_swap() {
             .unwrap();
         let status = resp.status();
         assert!(
-            status == StatusCode::OK
-                || status == StatusCode::NOT_MODIFIED
-                || status == StatusCode::UNAUTHORIZED,
+            status == StatusCode::OK || status == StatusCode::NOT_MODIFIED,
             "concurrent swap must not produce unexpected status: {status}"
         );
         if status == StatusCode::OK {
