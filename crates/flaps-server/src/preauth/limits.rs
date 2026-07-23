@@ -69,8 +69,14 @@ mod tests {
 
     #[test]
     fn the_bound_counts_bytes_not_characters() {
-        // Each of these characters costs two bytes in UTF-8.
-        let username = "e\u{301}".repeat(MAX_USERNAME_BYTES);
+        // A single-codepoint two-byte character, repeated so that the count in
+        // characters stays within the bound while the count in bytes exceeds
+        // it. This case discriminates: a byte count refuses it, a character
+        // count would wrongly accept it.
+        let username = "\u{e9}".repeat(129);
+        assert_eq!(username.chars().count(), 129);
+        assert_eq!(username.len(), 258);
+        assert!(username.chars().count() <= MAX_USERNAME_BYTES);
         assert!(
             validate_credential_lengths(&username, "password").is_err(),
             "the bound must be measured in bytes, since bytes are what is allocated"
