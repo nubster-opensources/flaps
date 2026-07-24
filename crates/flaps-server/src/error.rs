@@ -51,7 +51,10 @@ impl From<PreAuthRejection> for ApiError {
     ///
     /// Which layer refused is never disclosed: telling the caller whether the
     /// global, the per-address or the per-identity budget ran out would turn
-    /// the status code into a probe of other clients' activity.
+    /// the status code into a probe of other clients' activity. The
+    /// `Retry-After` value carried on the response is the same constant for
+    /// all three layers, so the header cannot be used as that side-channel
+    /// either.
     fn from(rejection: PreAuthRejection) -> Self {
         Self::TooManyRequests {
             retry_after_seconds: rejection.retry_after_seconds(),

@@ -222,20 +222,23 @@ cannot match this shape is refused immediately, before any database lookup
 and before any budget layer is consulted.
 
 For a well-formed credential, only a FAILED lookup (a key that parses but
-does not exist in the store) draws on the wide layers of the
-pre-authentication budget (global and per-address; the per-identity layer is
-never consulted on this path, since the presented key is exactly what an
-attacker rotates). A valid key never draws on this budget at all: it is not
+does not exist in the store) draws on the pre-authentication budget, and only
+on its per-address layer. The global layer is reserved for the `/login` path
+and is never consulted here, so that a flood of invalid SDK keys arriving
+from other addresses can never deny service to a valid SDK client, nor to
+`/login`, on an address the flood never touched. The per-identity layer is
+never consulted on this path either, since the presented key is exactly what
+an attacker rotates. A valid key never draws on this budget at all: it is not
 throttled by it, and stays governed only by the ordinary per-key SDK rate
 limiter (60 requests per minute by default). A flood of well-formed but
-nonexistent keys stops reaching the database once the global or per-address
-layer is exhausted; a flood of malformed keys never reaches the database in
-the first place.
+nonexistent keys stops reaching the database once the per-address layer is
+exhausted; a flood of malformed keys never reaches the database in the first
+place.
 
 An impossible key (fails the shape check) and an absent key (well-formed but
 unknown to the store) return the identical `401 Unauthorized` problem+json
 body: the status code and body never let a caller distinguish "this key
-cannot exist" from "this key does not exist". Once the wide budget layers are
+cannot exist" from "this key does not exist". Once the per-address layer is
 exhausted, a request is refused earlier still, before the lookup, with
 `429 Too Many Requests`: ordinary rate limiting, triggered by volume from the
-same address or global bucket, not a new oracle on key shape.
+same address, not a new oracle on key shape.

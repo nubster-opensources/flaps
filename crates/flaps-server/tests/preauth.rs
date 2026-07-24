@@ -5,7 +5,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use flaps_server::{bootstrap_admin, build_router, state::AppState};
+use flaps_server::{
+    bootstrap_admin, build_router,
+    state::{AppState, DEFAULT_PREAUTH_PER_CLIENT_CAPACITY},
+};
 use flaps_store::{hash::KeyHasher, sqlite::SqliteStore};
 use tower::ServiceExt as _;
 
@@ -411,9 +414,20 @@ async fn a_flood_of_wellformed_but_absent_keys_stops_hitting_the_database() {
     }
 
     let lookups_added = store.sdk_key_lookups() - before;
+    // The binding layer is now the per-client budget on the Unknown bucket
+    // (all 60 requests share one address: the test never sets connection
+    // info), so lookups can only happen while that bucket still has
+    // capacity. The margin of 2 absorbs the trickle refill
+    // (DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND = 1.0/s) that can grant
+    // at most one or two extra tokens over the wall-clock time 60 sequential
+    // in-memory requests take to run; it was picked by running this test
+    // repeatedly and stayed at exactly DEFAULT_PREAUTH_PER_CLIENT_CAPACITY
+    // lookups every time, so 2 leaves headroom without loosening the bound
+    // back toward "less than one per request".
+    let max_expected_lookups = u64::from(DEFAULT_PREAUTH_PER_CLIENT_CAPACITY) + 2;
     assert!(
-        lookups_added < 60,
-        "a flood of well-formed but absent keys must not produce one lookup per request, \
-         got {lookups_added} lookups for 60 requests"
+        lookups_added <= max_expected_lookups,
+        "a flood of well-formed but absent keys must stop at the per-client budget, \
+         got {lookups_added} lookups for 60 requests (expected at most {max_expected_lookups})"
     );
 }

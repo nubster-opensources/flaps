@@ -32,20 +32,27 @@ pub enum PreAuthRejection {
 
 impl PreAuthRejection {
     /// Returns the delay, in seconds, to advertise in `Retry-After`.
+    ///
+    /// The value is the same constant across all three variants, deliberately.
+    /// If the global layer advertised a different delay than the keyed
+    /// layers, the header itself would disclose which layer refused the
+    /// request, defeating the point of collapsing every rejection into one
+    /// indistinguishable 429.
+    // Kept as a method taking `self` (even though the body no longer reads
+    // it) so call sites stay `rejection.retry_after_seconds()`; the uniform
+    // value is exactly the point of this fix, not an oversight.
     #[must_use]
+    #[allow(clippy::unused_self)]
     pub fn retry_after_seconds(&self) -> u64 {
-        match self {
-            Self::GlobalBudgetExhausted => GLOBAL_RETRY_AFTER_SECS,
-            Self::ClientBudgetExhausted | Self::IdentityBudgetExhausted => KEYED_RETRY_AFTER_SECS,
-        }
+        PREAUTH_RETRY_AFTER_SECS
     }
 }
 
-/// Retry guidance for a saturated global budget.
-const GLOBAL_RETRY_AFTER_SECS: u64 = 5;
-
-/// Retry guidance for a saturated per-address or per-identity budget.
-const KEYED_RETRY_AFTER_SECS: u64 = 30;
+/// Retry guidance advertised for every pre-authentication rejection,
+/// regardless of which layer (global, per-client or per-identity) refused.
+/// Kept as one constant so the `Retry-After` header never becomes a
+/// side-channel for which layer is under pressure.
+const PREAUTH_RETRY_AFTER_SECS: u64 = 30;
 
 /// The key the global layer is bucketed under.
 ///
@@ -93,38 +100,42 @@ impl PreAuthBudget {
         Ok(())
     }
 
-    /// Checks, without consuming, whether the wide layers (global and
-    /// per-client) still admit an attempt from `client`. The per-identity
-    /// layer is NOT consulted: on the SDK path the identity is the presented
-    /// key, which an attacker rotates, so only the wide layers meaningfully
-    /// bound a flood.
+    /// Checks, without consuming, whether the per-client layer still admits
+    /// an attempt from `client`.
+    ///
+    /// Only the per-client layer applies on the SDK path. The global layer is
+    /// deliberately NOT consulted here: it is reserved for the login path, so
+    /// that a flood of absent keys hitting other addresses can never throttle
+    /// a valid key on an address the flood never touched. The per-identity
+    /// layer is not consulted either, since on this path the presented key is
+    /// exactly what an attacker rotates; a fresh key would otherwise always
+    /// start with a full per-identity budget.
     ///
     /// # Errors
-    /// Returns the widest exhausted layer.
+    /// Returns `ClientBudgetExhausted` if the per-client layer is drained.
     pub fn sdk_admits(&self, client: ClientAddress) -> Result<(), PreAuthRejection> {
-        if !self.global.has_capacity(GLOBAL_BUCKET_KEY) {
-            return Err(PreAuthRejection::GlobalBudgetExhausted);
-        }
         if !self.per_client.has_capacity(&client.bucket_key()) {
             return Err(PreAuthRejection::ClientBudgetExhausted);
         }
         Ok(())
     }
 
-    /// Consumes one attempt from the wide layers (global then per-client)
-    /// after a FAILED SDK key lookup. Valid keys never reach this call, so
-    /// legitimate SDK traffic never touches the budget.
+    /// Consumes one attempt from the per-client layer after a FAILED SDK key
+    /// lookup. Valid keys never reach this call, so legitimate SDK traffic
+    /// never touches the budget.
+    ///
+    /// Only the per-client layer is consumed. The global layer is
+    /// deliberately NOT consulted here: it stays reserved for the login path,
+    /// so a flood of absent keys from other addresses can never throttle a
+    /// valid SDK re-auth, nor `/login`, on an unaffected address.
     ///
     /// # Errors
-    /// Returns the widest layer that was already exhausted at consume time.
+    /// Returns `ClientBudgetExhausted` if the per-client layer was already
+    /// exhausted at consume time.
     pub fn consume_sdk_failure(&self, client: ClientAddress) -> Result<(), PreAuthRejection> {
-        self.global
-            .check(GLOBAL_BUCKET_KEY)
-            .map_err(|_| PreAuthRejection::GlobalBudgetExhausted)?;
         self.per_client
             .check(&client.bucket_key())
-            .map_err(|_| PreAuthRejection::ClientBudgetExhausted)?;
-        Ok(())
+            .map_err(|_| PreAuthRejection::ClientBudgetExhausted)
     }
 }
 
@@ -276,13 +287,53 @@ mod tests {
     }
 
     #[test]
+    fn consume_sdk_failure_never_touches_the_global_layer() {
+        let budget = PreAuthBudget::new(config(2, 2, 1_000));
+
+        // Drain the SDK-failure path (per-client only) from one address.
+        for attempt in 0..2 {
+            assert!(
+                budget.consume_sdk_failure(address(1)).is_ok(),
+                "attempt {attempt} is within the per-client budget"
+            );
+        }
+        assert_eq!(
+            budget.sdk_admits(address(1)),
+            Err(PreAuthRejection::ClientBudgetExhausted),
+            "the per-client layer must now be exhausted for address(1)"
+        );
+
+        // A login-shaped consume from a DIFFERENT address still succeeds:
+        // the global layer, which `consume` also checks, was never touched
+        // by the SDK-failure path above, no matter how many times it ran.
+        assert!(
+            budget.consume(address(2), "alice").is_ok(),
+            "the global layer must still have its full capacity: the SDK \
+             path never consumes from it"
+        );
+    }
+
+    #[test]
     fn every_rejection_carries_a_retry_delay() {
-        for rejection in [
+        let delays: Vec<u64> = [
             PreAuthRejection::GlobalBudgetExhausted,
             PreAuthRejection::ClientBudgetExhausted,
             PreAuthRejection::IdentityBudgetExhausted,
-        ] {
-            assert!(rejection.retry_after_seconds() >= 1);
+        ]
+        .into_iter()
+        .map(|rejection| rejection.retry_after_seconds())
+        .collect();
+
+        for delay in &delays {
+            assert!(*delay >= 1);
         }
+        assert_eq!(
+            delays[0], delays[1],
+            "the global and per-client delays must be identical"
+        );
+        assert_eq!(
+            delays[1], delays[2],
+            "the per-client and per-identity delays must be identical"
+        );
     }
 }
