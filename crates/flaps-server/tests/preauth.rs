@@ -169,13 +169,17 @@ async fn a_throttled_login_advertises_a_retry_delay() {
 async fn a_same_username_brute_force_is_throttled_with_the_uniform_retry_delay() {
     let app = make_app().await;
 
+    // A password that is deliberately not the admin's, derived at runtime so the
+    // fixture carries no hard-coded credential literal of its own.
+    let wrong_password = format!("not-{ADMIN_PASS}");
+
     let mut statuses = Vec::new();
     let mut throttle_retry_after: Option<String> = None;
 
     for _ in 0..8 {
         let response = app
             .clone()
-            .oneshot(login_request(ADMIN_USER, "wrong-password"))
+            .oneshot(login_request(ADMIN_USER, &wrong_password))
             .await
             .expect("router response");
         let status = response.status();
