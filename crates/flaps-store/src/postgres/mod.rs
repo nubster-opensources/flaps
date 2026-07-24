@@ -1,6 +1,7 @@
 //! PostgreSQL backend: pool construction, migrations and repository implementations.
 
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
@@ -58,6 +59,21 @@ fn verify_password(password: &str, hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Verifies a password on a blocking thread.
+///
+/// Argon2 is CPU-bound by design. Called directly inside an `async fn` it runs
+/// on a runtime worker thread, so a burst of logins stalls unrelated requests.
+/// The decoy path goes through here too: leaving it synchronous would preserve
+/// the amplifier on precisely the branch an attacker without a valid account
+/// reaches.
+async fn verify_password_off_runtime(password: &str, hash: &str) -> bool {
+    let password = password.to_owned();
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .unwrap_or(false)
 }
 
 /// Fixed decoy argon2id hash, derived once at process start with the exact same
@@ -573,6 +589,7 @@ fn embedded_migrator() -> Migrator {
 pub struct PostgresStore {
     pool: Pool<Postgres>,
     hasher: KeyHasher,
+    sdk_key_lookups: Arc<AtomicU64>,
 }
 
 impl PostgresStore {
@@ -583,7 +600,20 @@ impl PostgresStore {
     pub async fn connect(url: &str, hasher: KeyHasher) -> StoreResult<Self> {
         let pool = sqlx::postgres::PgPoolOptions::new().connect(url).await?;
         embedded_migrator().run(&pool).await?;
-        Ok(Self { pool, hasher })
+        Ok(Self {
+            pool,
+            hasher,
+            sdk_key_lookups: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Returns the cumulative number of SDK key lookups this store has served.
+    ///
+    /// Exposed as an operational counter: it is what proves a flood of
+    /// impossible credentials is refused before reaching the database.
+    #[must_use]
+    pub fn sdk_key_lookups(&self) -> u64 {
+        self.sdk_key_lookups.load(Ordering::Relaxed)
     }
 }
 
@@ -1109,6 +1139,8 @@ impl SdkKeyRepository for PostgresStore {
     }
 
     async fn find_sdk_key(&self, raw_key: &str) -> StoreResult<Option<SdkKeyRecord>> {
+        self.sdk_key_lookups.fetch_add(1, Ordering::Relaxed);
+
         let key_hash = self.hasher.hash(raw_key);
 
         let row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
@@ -1279,16 +1311,16 @@ impl AccountRepository for PostgresStore {
         let Some((id, uname, hash, is_active)) = row else {
             // Spend the same argon2 verification cost as a real account so that
             // enumeration cannot be inferred from response timing (best effort).
-            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
+            let _ = verify_password_off_runtime(password, &DUMMY_PASSWORD_HASH).await;
             return Ok(None);
         };
 
         if !is_active {
-            let _ = verify_password(password, &DUMMY_PASSWORD_HASH);
+            let _ = verify_password_off_runtime(password, &DUMMY_PASSWORD_HASH).await;
             return Ok(None);
         }
 
-        if verify_password(password, &hash) {
+        if verify_password_off_runtime(password, &hash).await {
             Ok(Some(AccountRecord {
                 id,
                 username: uname,

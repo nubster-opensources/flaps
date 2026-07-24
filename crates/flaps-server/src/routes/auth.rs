@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::ApiError,
+    preauth::{client_address::ClientAddress, limits::validate_credential_lengths},
     state::{AppState, Store},
 };
 
@@ -28,21 +29,38 @@ pub struct LoginResponse {
 
 /// `POST /login` - verify credentials and mint a session token.
 ///
+/// # Ordering
+/// Length bounds, then the layered pre-authentication budget, then the login
+/// rate limiter, then the password verification concurrency ceiling, then the
+/// store. Each step is cheaper than the one it guards.
+///
 /// # Errors
-/// - 429 too many requests (`Retry-After` header), throttled per username via
-///   [`AppState::login_rate_limiter`], before credentials are even checked.
+/// - 422 unprocessable entity when a credential exceeds its accepted length.
+/// - 429 too many requests (`Retry-After` header) when the pre-authentication
+///   budget is exhausted, before any store access.
+/// - 401 unauthorized when the credentials do not match.
 pub async fn post_login<S: Store>(
     State(state): State<AppState<S>>,
+    client: ClientAddress,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    // Rate limit keyed by username, ahead of any store access: caps the rate
-    // of brute-force attempts against a single account.
+    // Bound what the caller sent before anything allocates on its behalf.
+    validate_credential_lengths(&body.username, &body.password)?;
+
+    // Layered budget: the widest layer refuses first and costs the least.
+    state.preauth_budget.consume(client, &body.username)?;
+
+    // Per-account throttle, kept for the brute-force cap it already provides.
     state
         .login_rate_limiter
         .check(&body.username)
         .map_err(|retry_after_seconds| ApiError::TooManyRequests {
             retry_after_seconds,
         })?;
+
+    // Hold the permit across the entire verification so the number of Argon2
+    // computations in flight is bounded by the pool, not by Tokio's blocking pool.
+    let _verification_permit = state.password_pool.try_acquire().map_err(ApiError::from)?;
 
     let account = state
         .store

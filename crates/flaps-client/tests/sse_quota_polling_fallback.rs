@@ -39,7 +39,10 @@ const PROJECT: &str = "polling-fallback-proj";
 const ENVIRONMENT: &str = "polling-fallback-env";
 const FLAG: &str = "polling-fallback-flag";
 const ADMIN_PASSWORD: &str = "admin-pass";
-const SDK_SECRET: &str = "s-polling-fallback-server-key-0123456789";
+// Well-formed: matches the shape `reject_impossible_sdk_key` accepts (see
+// issue #134), so this fixture reaches the store instead of being refused
+// before it.
+const SDK_SECRET: &str = "sv_5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
 
 /// A running Flaps server on a real ephemeral socket, seeded with a single
 /// boolean flag active in one environment, whose SSE concurrency quota is
@@ -75,6 +78,11 @@ async fn spawn_quota_exhausted_server() -> ServerHandle {
         max_global: 0,
         max_per_key: 0,
     })));
+
+    // The default pre-authentication budget is used here (see issue #134
+    // Option A): a valid SDK key never consumes it, since it is only spent on
+    // a FAILED key lookup, so this test's own SSE reconnect attempts and
+    // 50ms polling cadence on the same valid key never touch it.
 
     flaps_server::recompile::recompile_environment(&state, &project_key, &env_key)
         .await

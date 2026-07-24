@@ -8,6 +8,8 @@ use serde_json::json;
 
 use flaps_store::StoreError;
 
+use crate::preauth::budget::PreAuthRejection;
+
 /// All error outcomes the admin API can return, mapped to problem+json.
 #[derive(Debug)]
 pub enum ApiError {
@@ -40,6 +42,22 @@ impl From<StoreError> for ApiError {
             StoreError::Conflict(msg) => Self::Conflict(msg),
             StoreError::NotFound | StoreError::ForeignKeyViolation => Self::NotFound,
             other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+impl From<PreAuthRejection> for ApiError {
+    /// Maps every budget refusal to one indistinguishable 429.
+    ///
+    /// Which layer refused is never disclosed: telling the caller whether the
+    /// global, the per-address or the per-identity budget ran out would turn
+    /// the status code into a probe of other clients' activity. The
+    /// `Retry-After` value carried on the response is the same constant for
+    /// all three layers, so the header cannot be used as that side-channel
+    /// either.
+    fn from(rejection: PreAuthRejection) -> Self {
+        Self::TooManyRequests {
+            retry_after_seconds: rejection.retry_after_seconds(),
         }
     }
 }

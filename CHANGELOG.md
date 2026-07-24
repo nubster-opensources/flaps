@@ -30,6 +30,19 @@ This project adheres to [Semantic Versioning](docs/SEMVER_POLICY.md).
   supply-chain audit.
 - Dual MIT OR Apache-2.0 licensing, `deny.toml` supply-chain policy.
 
+### Security
+
+- Bound the length of login credentials and the size of the login request body.
+- Add a layered pre-authentication budget keyed on the connection address and
+  the submitted identity, closing the username-rotation path that bypassed the
+  per-account throttle (#133).
+- Run password verification off the async runtime, with its concurrency bounded
+  independently of the database connection pool (#133).
+- Evict rate limiter buckets by sampling instead of sorting the whole table, so
+  the memory bound is no longer an amplifier of its own (#133).
+- Refuse impossible SDK credentials before the database lookup, and budget the
+  attempt on a failed lookup rather than on a prefix known only afterwards (#134).
+
 ## M0: Foundations
 
 ### Added

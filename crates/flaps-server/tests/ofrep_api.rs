@@ -710,8 +710,8 @@ async fn bulk_mixed_success_and_disabled() {
 /// produce a panic or a partially-evaluated response.
 ///
 /// We spawn a task that repeatedly swaps the cache while another task fires
-/// bulk evaluation requests. Every response must be either 200 with a valid
-/// `flags` array or 304. No panics or 500s are acceptable.
+/// bulk evaluation requests. Every response must be 200 with a valid `flags`
+/// array, or 304. No panics or 500s are acceptable.
 #[tokio::test]
 async fn bulk_atomicity_concurrent_cache_swap() {
     use flaps_server::recompile::install_in_cache;

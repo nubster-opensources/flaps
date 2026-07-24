@@ -16,6 +16,7 @@ use flaps_domain::{
 };
 use flaps_server::{
     bootstrap_admin, build_router,
+    preauth::budget::{PreAuthBudget, PreAuthBudgetConfig},
     rate_limit::{RateLimitConfig, RateLimiter},
     state::AppState,
 };
@@ -1315,12 +1316,27 @@ async fn login_rate_limiter_disabled_never_throttles() {
         refill_per_second: 1.0,
     }));
     let login_rate_limiter = Arc::new(RateLimiter::disabled());
-    let state = AppState::with_config(
+    let mut state = AppState::with_config(
         store,
         rate_limiter,
         login_rate_limiter,
         std::time::Duration::from_secs(3600),
     );
+    // `with_config` always wires an enabled pre-authentication budget (see
+    // issues #133 and #134), independent of the login rate limiter above:
+    // this test targets the login rate limiter specifically, so the budget
+    // layered in front of it must be disabled here too, or its own
+    // per-identity layer (capacity 5) would throttle attempt 6 on its own.
+    let disabled_layer = RateLimitConfig {
+        enabled: false,
+        capacity: u32::MAX,
+        refill_per_second: f64::MAX / 2.0,
+    };
+    state.preauth_budget = Arc::new(PreAuthBudget::new(PreAuthBudgetConfig {
+        global: disabled_layer,
+        per_client: disabled_layer,
+        per_identity: disabled_layer,
+    }));
     let app = build_router(state);
 
     for attempt in 1..=10 {
