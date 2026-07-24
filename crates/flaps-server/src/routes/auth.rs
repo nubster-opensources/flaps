@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::ApiError,
-    preauth::{client_address::ClientAddress, limits::validate_credential_lengths},
+    preauth::{
+        budget::PreAuthRejection, client_address::ClientAddress,
+        limits::validate_credential_lengths,
+    },
     state::{AppState, Store},
 };
 
@@ -48,15 +51,18 @@ pub async fn post_login<S: Store>(
     validate_credential_lengths(&body.username, &body.password)?;
 
     // Layered budget: the widest layer refuses first and costs the least.
-    state.preauth_budget.consume(client, &body.username)?;
+    state.preauth_budget.consume(client)?;
 
-    // Per-account throttle, kept for the brute-force cap it already provides.
+    // Per-account throttle: the single component owning the per-identity
+    // policy since the redundant budget layer was collapsed into it (#158).
+    // Its refusal is mapped to the uniform pre-auth rejection, so a login
+    // throttle is indistinguishable from a budget refusal and advertises the
+    // same Retry-After; the token bucket's dynamic wait is deliberately
+    // discarded, since it would leak the targeted account bucket's fill level.
     state
         .login_rate_limiter
         .check(&body.username)
-        .map_err(|retry_after_seconds| ApiError::TooManyRequests {
-            retry_after_seconds,
-        })?;
+        .map_err(|_| PreAuthRejection::IdentityBudgetExhausted)?;
 
     // Hold the permit across the entire verification so the number of Argon2
     // computations in flight is bounded by the pool, not by Tokio's blocking pool.

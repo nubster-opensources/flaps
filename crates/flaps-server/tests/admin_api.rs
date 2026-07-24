@@ -1323,10 +1323,10 @@ async fn login_rate_limiter_disabled_never_throttles() {
         std::time::Duration::from_secs(3600),
     );
     // `with_config` always wires an enabled pre-authentication budget (see
-    // issues #133 and #134), independent of the login rate limiter above:
-    // this test targets the login rate limiter specifically, so the budget
-    // layered in front of it must be disabled here too, or its own
-    // per-identity layer (capacity 5) would throttle attempt 6 on its own.
+    // issues #133 and #134), independent of the login rate limiter above.
+    // This test targets the login rate limiter in isolation, so the budget's
+    // global and per-address layers are disabled here too, keeping any budget
+    // refusal from standing in for the throttle the test means to exercise.
     let disabled_layer = RateLimitConfig {
         enabled: false,
         capacity: u32::MAX,
@@ -1335,7 +1335,6 @@ async fn login_rate_limiter_disabled_never_throttles() {
     state.preauth_budget = Arc::new(PreAuthBudget::new(PreAuthBudgetConfig {
         global: disabled_layer,
         per_client: disabled_layer,
-        per_identity: disabled_layer,
     }));
     let app = build_router(state);
 

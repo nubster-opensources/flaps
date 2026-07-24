@@ -156,6 +156,73 @@ async fn a_throttled_login_advertises_a_retry_delay() {
     );
 }
 
+/// Characterizes the per-account login throttle so it survives collapsing the
+/// redundant per-identity budget layer into the login rate limiter (#158).
+///
+/// A same-username brute force from one address must be refused only after the
+/// account budget (5 attempts) is spent, and the refusal must advertise the
+/// uniform pre-authentication `Retry-After` of 30 seconds. A dynamic per-bucket
+/// wait would leak how full the targeted account's bucket is, turning the
+/// header into an oracle; the uniform value is the security property being
+/// preserved, not an incidental detail.
+#[tokio::test]
+async fn a_same_username_brute_force_is_throttled_with_the_uniform_retry_delay() {
+    let app = make_app().await;
+
+    // A password that is deliberately not the admin's, derived at runtime so the
+    // fixture carries no hard-coded credential literal of its own.
+    let wrong_password = format!("not-{ADMIN_PASS}");
+
+    let mut statuses = Vec::new();
+    let mut throttle_retry_after: Option<String> = None;
+
+    for _ in 0..8 {
+        let response = app
+            .clone()
+            .oneshot(login_request(ADMIN_USER, &wrong_password))
+            .await
+            .expect("router response");
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS && throttle_retry_after.is_none() {
+            throttle_retry_after = Some(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        statuses.push(status);
+    }
+
+    // The account budget is 5: the first five wrong-password attempts are each
+    // answered on their own merits (401), never throttled before the budget is
+    // spent.
+    for (index, status) in statuses.iter().take(5).enumerate() {
+        assert_eq!(
+            *status,
+            StatusCode::UNAUTHORIZED,
+            "attempt {index} must be answered 401, not throttled before the account budget of 5; \
+             got {statuses:?}"
+        );
+    }
+
+    // The sixth attempt is the first refusal.
+    assert_eq!(
+        statuses[5],
+        StatusCode::TOO_MANY_REQUESTS,
+        "the sixth same-username attempt must be throttled, got {statuses:?}"
+    );
+
+    assert_eq!(
+        throttle_retry_after.as_deref(),
+        Some("30"),
+        "the login throttle must advertise the uniform 30s pre-auth Retry-After, \
+         not a dynamic per-bucket wait that would leak the account bucket's fill level"
+    );
+}
+
 #[tokio::test]
 async fn a_login_burst_does_not_starve_unrelated_requests() {
     // The point of moving Argon2 off the runtime: a burst of logins must not
