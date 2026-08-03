@@ -152,9 +152,10 @@ pub struct AppState<S: Store> {
     /// Layered budget guarding unauthenticated entry points (see issues #133
     /// and #134).
     ///
-    /// Distinct from [`Self::login_rate_limiter`], which is the per-identity
-    /// layer alone and is kept for the account-level throttle it already
-    /// provides.
+    /// Bounds the global and per-address attempt rate. The per-account throttle
+    /// is not a layer here: [`Self::login_rate_limiter`] is the single component
+    /// that owns it, since the redundant per-identity layer was collapsed into
+    /// it (see issue #158).
     pub preauth_budget: Arc<PreAuthBudget>,
     /// Concurrency ceiling on password verification (see issue #133).
     pub password_pool: Arc<PasswordVerificationPool>,
@@ -209,11 +210,6 @@ impl<S: Store> AppState<S> {
                     capacity: DEFAULT_PREAUTH_PER_CLIENT_CAPACITY,
                     refill_per_second: DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND,
                 },
-                per_identity: RateLimitConfig {
-                    enabled: true,
-                    capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
-                    refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
-                },
             })),
             password_pool: Arc::new(PasswordVerificationPool::new()),
             session_ttl: DEFAULT_SESSION_TTL,
@@ -254,11 +250,6 @@ impl<S: Store> AppState<S> {
                     enabled: true,
                     capacity: DEFAULT_PREAUTH_PER_CLIENT_CAPACITY,
                     refill_per_second: DEFAULT_PREAUTH_PER_CLIENT_REFILL_PER_SECOND,
-                },
-                per_identity: RateLimitConfig {
-                    enabled: true,
-                    capacity: DEFAULT_LOGIN_RATE_LIMIT_CAPACITY,
-                    refill_per_second: DEFAULT_LOGIN_RATE_LIMIT_REFILL_PER_SECOND,
                 },
             })),
             password_pool: Arc::new(PasswordVerificationPool::new()),
