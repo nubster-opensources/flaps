@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # rust-toolchain.toml pins 1.88.0 and outranks the toolchain the setup
+      # rust-toolchain.toml pins 1.89.0 and outranks the toolchain the setup
       # action installs as the default, so libFuzzer would never see nightly.
       # RUSTUP_TOOLCHAIN outranks the file and is the only reliable override.
       RUSTUP_TOOLCHAIN: nightly-2026-07-15
@@ -56,7 +56,7 @@ jobs:
             echo "in-scope=false" >>"$GITHUB_OUTPUT"
             echo "no fuzzed parser changed; reporting success without building"
           fi
-      - uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.88.0 action
+      - uses: dtolnay/rust-toolchain@39b0b3842c7e8bbf6904c0bfc3d9006fdd4dc4e0 # 1.89.0 action
         if: steps.scope.outputs.in-scope == 'true'
         with:
           toolchain: nightly-2026-07-15

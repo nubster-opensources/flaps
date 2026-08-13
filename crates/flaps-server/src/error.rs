@@ -149,10 +149,10 @@ impl IntoResponse for ApiError {
             HeaderValue::from_static("application/problem+json"),
         );
 
-        if let Some(secs) = retry_after {
-            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
-                builder = builder.header("Retry-After", v);
-            }
+        if let Some(secs) = retry_after
+            && let Ok(v) = HeaderValue::from_str(&secs.to_string())
+        {
+            builder = builder.header("Retry-After", v);
         }
 
         builder

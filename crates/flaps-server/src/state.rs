@@ -360,10 +360,10 @@ impl<S: Store> AppState<S> {
             .mutation_locks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = registry.get(project) {
-            if Arc::strong_count(entry) == 1 {
-                registry.remove(project);
-            }
+        if let Some(entry) = registry.get(project)
+            && Arc::strong_count(entry) == 1
+        {
+            registry.remove(project);
         }
     }
 

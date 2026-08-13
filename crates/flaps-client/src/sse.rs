@@ -91,15 +91,15 @@ impl SseDecoder {
     fn dispatch_line(&mut self, line: &str, notifications: &mut Vec<SseNotification>) {
         if line.is_empty() {
             // Blank line = end of event dispatch.
-            if let Some(data) = self.data_buf.take() {
-                if let Ok(payload) = serde_json::from_str::<EventPayload>(&data) {
-                    notifications.push(SseNotification {
-                        environment: payload.environment,
-                        version: payload.version,
-                    });
-                }
-                // Invalid JSON -> silently skip this event.
+            if let Some(data) = self.data_buf.take()
+                && let Ok(payload) = serde_json::from_str::<EventPayload>(&data)
+            {
+                notifications.push(SseNotification {
+                    environment: payload.environment,
+                    version: payload.version,
+                });
             }
+            // Invalid JSON -> silently skip this event.
         } else if let Some(value) = line.strip_prefix("data:") {
             // RFC 8895: optional leading space after the colon.
             let value = value.strip_prefix(' ').unwrap_or(value);

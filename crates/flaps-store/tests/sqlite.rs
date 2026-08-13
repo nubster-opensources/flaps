@@ -18,7 +18,7 @@ async fn sqlite_suite() {
     shared::run_all(store).await;
 }
 
-/// Test 10: sdk_key_is_hashed_at_rest.
+/// Test 10: `sdk_key_is_hashed_at_rest`.
 ///
 /// Verifies that the prefix stored is the leading portion of the raw key (not the
 /// full value), that a second lookup with a different raw key returns None, and

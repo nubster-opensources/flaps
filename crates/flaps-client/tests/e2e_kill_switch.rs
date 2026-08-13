@@ -248,10 +248,10 @@ async fn wait_for_version_above(
 ) -> (u64, Duration) {
     let start = Instant::now();
     loop {
-        if let Some(v) = provider.sync_status().version {
-            if v > floor {
-                return (v, start.elapsed());
-            }
+        if let Some(v) = provider.sync_status().version
+            && v > floor
+        {
+            return (v, start.elapsed());
         }
         assert!(
             start.elapsed() < budget,
