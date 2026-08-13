@@ -285,7 +285,7 @@ mod tests {
 
     /// Proves the best-effort contract: a valid environment is compiled into the
     /// cache while a corrupt one (flag config references a missing segment) is
-    /// skipped. warm_up_cache must not panic and must not return Err.
+    /// skipped. `warm_up_cache` must not panic and must not return `Err`.
     #[tokio::test]
     async fn warm_up_cache_skips_corrupt_env_and_keeps_valid_env() {
         let store = make_store().await;
@@ -488,9 +488,9 @@ mod tests {
         assert_eq!(*call_count.lock().unwrap(), 4, "connector called 4 times");
     }
 
-    /// Verifies that the connector returns Err when every attempt fails.
+    /// Verifies that the connector returns `Err` when every attempt fails.
     ///
-    /// Uses base_ms = 0 via the inner helper so no real sleep occurs; the test
+    /// Uses `base_ms = 0` via the inner helper so no real sleep occurs; the test
     /// completes in milliseconds and does not need to be ignored.
     #[tokio::test]
     async fn connect_store_with_retry_returns_err_after_max_attempts() {
@@ -503,16 +503,16 @@ mod tests {
 
     // -- AC#1: integration boot (warm-up + bootstrap + router serves warmed data) --
 
-    /// Proves AC#1 end-to-end using an in-memory SQLite store:
+    /// Proves AC#1 end-to-end using an in-memory `SQLite` store:
     ///
-    /// 1. Seed a project, environment, flag, SDK key and FlagEnvConfig in the store.
-    /// 2. Run warm_up_cache so the compiled ruleset is loaded into the cache.
-    /// 3. Run bootstrap_admin_once to create the admin account.
+    /// 1. Seed a project, environment, flag, SDK key and `FlagEnvConfig` in the store.
+    /// 2. Run `warm_up_cache` so the compiled ruleset is loaded into the cache.
+    /// 3. Run `bootstrap_admin_once` to create the admin account.
     /// 4. Build the router and exercise the OFREP single-flag evaluation endpoint
-    ///    via tower::oneshot with the seeded SDK key.
+    ///    via `tower::oneshot` with the seeded SDK key.
     /// 5. Assert that the response status is 200 and the returned value comes from
     ///    the compiled ruleset (the flag is disabled, so the response reason is
-    ///    DISABLED), proving the cache was consumed on the hot path.
+    ///    `DISABLED`), proving the cache was consumed on the hot path.
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn integration_boot_sqlite_warm_cache_and_router_serve_ofrep() {

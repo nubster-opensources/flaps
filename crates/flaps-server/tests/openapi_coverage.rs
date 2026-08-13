@@ -37,12 +37,12 @@ impl RouteVisitor {
     fn collect_methods(expr: &Expr, methods: &mut Vec<String>) {
         match expr {
             Expr::Call(call) => {
-                if let Expr::Path(path) = call.func.as_ref() {
-                    if let Some(segment) = path.path.segments.last() {
-                        let name = segment.ident.to_string();
-                        if HTTP_METHODS.contains(&name.as_str()) {
-                            methods.push(name.to_uppercase());
-                        }
+                if let Expr::Path(path) = call.func.as_ref()
+                    && let Some(segment) = path.path.segments.last()
+                {
+                    let name = segment.ident.to_string();
+                    if HTTP_METHODS.contains(&name.as_str()) {
+                        methods.push(name.to_uppercase());
                     }
                 }
             }
@@ -65,14 +65,14 @@ impl<'ast> Visit<'ast> for RouteVisitor {
             let path_arg = args.next();
             let route_arg = args.next();
 
-            if let (Some(Expr::Lit(path_lit)), Some(route_expr)) = (path_arg, route_arg) {
-                if let Lit::Str(path_str) = &path_lit.lit {
-                    let path = path_str.value();
-                    let mut methods = Vec::new();
-                    Self::collect_methods(route_expr, &mut methods);
-                    for method in methods {
-                        self.routes.insert((method, path.clone()));
-                    }
+            if let (Some(Expr::Lit(path_lit)), Some(route_expr)) = (path_arg, route_arg)
+                && let Lit::Str(path_str) = &path_lit.lit
+            {
+                let path = path_str.value();
+                let mut methods = Vec::new();
+                Self::collect_methods(route_expr, &mut methods);
+                for method in methods {
+                    self.routes.insert((method, path.clone()));
                 }
             }
         }

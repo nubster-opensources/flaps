@@ -291,7 +291,7 @@ mod tests {
     // -- build_app_state: rate_limit_per_minute --
 
     /// Proves `rate_limit_per_minute` configures the SDK rate limiter through
-    /// the actual router (AC: "rate_limit_per_minute configures the SDK rate
+    /// the actual router (AC: "`rate_limit_per_minute` configures the SDK rate
     /// limiter", "Integration tests prove non-default values are applied
     /// through the running router").
     #[tokio::test]

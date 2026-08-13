@@ -1,2 +1,6 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# Keep dependency updates within the package's declared `rust-version`.
+[resolver]
+incompatible-rust-versions = "fallback"

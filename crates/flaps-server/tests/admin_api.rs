@@ -1353,7 +1353,7 @@ async fn login_rate_limiter_disabled_never_throttles() {
 // ---------------------------------------------------------------------------
 
 /// Covers all ten admin read handlers (list/get on projects, environments,
-/// flags, segments, flag-env-config, and list_sdk_keys): an anonymous request
+/// flags, segments, flag-env-config, and `list_sdk_keys`): an anonymous request
 /// must be rejected with 401, and the same request presenting a valid admin
 /// session token must succeed with 200.
 #[tokio::test]

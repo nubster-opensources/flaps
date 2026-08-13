@@ -6,7 +6,7 @@
 //! on the hot path.
 //!
 //! Provider note: the `open-feature` Rust provider crate for OFREP is not yet
-//! stable at MSRV 1.88; conformance is validated here through golden JSON
+//! stable at MSRV 1.89; conformance is validated here through golden JSON
 //! response bodies checked against the OFREP 0.3.0 schema expectations.
 
 use std::sync::Arc;
@@ -683,7 +683,7 @@ async fn bulk_400_invalid_context_bad_json() {
 /// Bulk response can contain both successes and per-flag errors coexisting.
 /// We inject a document with two flags, then evaluate: both are present in
 /// the flags array. A flag-not-found cannot be triggered from within an
-/// existing FlagSet so we test with a real disabled flag to verify both
+/// existing `FlagSet` so we test with a real disabled flag to verify both
 /// success and DISABLED entries coexist.
 #[tokio::test]
 async fn bulk_mixed_success_and_disabled() {

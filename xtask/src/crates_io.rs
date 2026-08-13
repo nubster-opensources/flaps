@@ -88,12 +88,11 @@ pub(crate) fn wait_for_index(
     let url = format!("{INDEX_HOST}/{}", index_path(name));
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(resp) = client.get(&url).send() {
-            if let Ok(body) = resp.text() {
-                if index_has_version(&body, version) {
-                    return Ok(());
-                }
-            }
+        if let Ok(resp) = client.get(&url).send()
+            && let Ok(body) = resp.text()
+            && index_has_version(&body, version)
+        {
+            return Ok(());
         }
         anyhow::ensure!(
             Instant::now() < deadline,

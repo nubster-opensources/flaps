@@ -164,7 +164,7 @@ async fn timeout<F: std::future::Future>(fut: F) -> F::Output {
 // Per-key quota
 // ---------------------------------------------------------------------------
 
-/// The (max_per_key + 1)-th concurrent subscription for the same key is
+/// The `(max_per_key + 1)`th concurrent subscription for the same key is
 /// rejected with 429, while earlier ones stay open.
 #[tokio::test]
 async fn nth_plus_one_subscription_for_key_is_rejected() {

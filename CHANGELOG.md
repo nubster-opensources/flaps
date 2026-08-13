@@ -30,6 +30,10 @@ This project adheres to [Semantic Versioning](docs/SEMVER_POLICY.md).
   supply-chain audit.
 - Dual MIT OR Apache-2.0 licensing, `deny.toml` supply-chain policy.
 
+### Changed
+
+- Raise the MSRV from Rust 1.88 to 1.89 for the August 2026 fleet baseline and prefer MSRV-compatible dependency versions during Cargo updates.
+
 ### Security
 
 - Bound the length of login credentials and the size of the login request body.
