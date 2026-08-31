@@ -14,7 +14,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@6b806938ea17fb50106fc3317f9da40b277f9e34 # main 2026-07-22
+    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@5c7ddc431a231e04363f7924af7a1aea5909581b # v1.0.0
     with:
       pr-number: ${{ github.event.pull_request.number }}
       mode: team
@@ -26,7 +26,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@6b806938ea17fb50106fc3317f9da40b277f9e34 # main 2026-07-22
+    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@5c7ddc431a231e04363f7924af7a1aea5909581b # v1.0.0
     with:
       pr-number: ${{ github.event.pull_request.number }}
       mode: describe
