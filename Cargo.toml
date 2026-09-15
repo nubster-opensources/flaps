@@ -44,7 +44,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 hmac = "0.13"
 sha2 = "0.11"
 hex = "0.4"
-argon2 = "0.5"
+argon2 = "0.6"
 uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.8", features = ["json", "macros"] }
 tower = { version = "0.5", features = ["util"] }
