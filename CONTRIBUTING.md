@@ -1,47 +1,20 @@
-# Contributing to Flaps
+# Contributing
 
-Flaps is currently in **pre-alpha**. The repository is public from day one to make the design discussion visible, but the public API is not stable yet. Contributions are welcome; the information below describes the conventions that apply.
+Thanks for contributing to this project.
 
-## Conventions
+## Setup
 
-Flaps follows the Nubster general coding standards documented in [nubster-docs](https://github.com/nubster-opensources/nubster-docs/tree/main/docs/reference/coding-standards). In short:
+1. Fork and clone this repository.
+2. Install dependencies from the project toolchain files.
+3. Run the test suite (or build) before opening a pull request.
 
-- **Trunk-Based Development**, feature branches `feature/<issue>-<slug>` from `main`, never commit directly on `main`.
-- **Conventional Commits**, all commit messages follow the `type(scope): description` format, enforced by `cog verify` in the commit-msg hook.
-- **Rust style**, workspace lints `clippy::all` and `clippy::pedantic` set to `deny`, MSRV pinned in `rust-toolchain.toml` and `Cargo.toml`.
-- **No competitor mentions**, the source code, commit messages, pull requests and documentation never name competing tools or services.
-- **English everywhere**, rustdoc comments, public types, commit messages, issues and project documentation are all written in English.
-- **No vendor lock-in**, every external integration (auth, events, audit) goes through an open standard (OIDC, SCIM, CloudEvents, HMAC). Nubster Identity and Hexeract are the default convenient options, never a hard dependency.
+## Pull requests
 
-## Local setup
+- Keep changes focused and clearly described.
+- Link related issues (for example `Fixes #123`).
+- Include a short test plan.
+- Match existing code style.
 
-```bash
-# Pin the Rust toolchain via rustup
-rustup show
+## Conduct
 
-# Install the commit-msg hook (runs cog verify on every commit)
-cog install-hook commit-msg
-
-# Local checks before pushing
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-```
-
-## Discussion before code
-
-Until v0.1.0, all design decisions go through a `discussion/` thread on the repository before any pull request is opened. This includes the public traits, the evaluation engine contracts, the compiler pipeline, the store schema and the OFREP API surface.
-
-## Contributor License Agreement
-
-Contributions to this project are governed by the Nubster Contributor License Agreement, hosted at [github.com/nubster-opensources/cla](https://github.com/nubster-opensources/cla).
-
-On your first pull request, the CLA Assistant bot will automatically prompt you to sign the CLA. Once signed, your signature applies to all current and future contributions to any `nubster-opensources` project.
-
-The CLA is a license grant (not a copyright assignment): you keep the copyright on your contributions and grant Nubster a broad license to use, sub-license, and re-license them.
-
-## License
-
-By contributing, you agree that your contributions are dual-licensed under the [MIT License](./LICENSE-MIT) and the [Apache License, Version 2.0](./LICENSE-APACHE), at the user's option.
-
-Copyright (c) Nubster.
+Be respectful and constructive in reviews and discussions.
