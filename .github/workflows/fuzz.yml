@@ -60,7 +60,7 @@ jobs:
         if: steps.scope.outputs.in-scope == 'true'
         with:
           toolchain: nightly-2026-07-15
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         if: steps.scope.outputs.in-scope == 'true'
         with:
           key: fuzz
